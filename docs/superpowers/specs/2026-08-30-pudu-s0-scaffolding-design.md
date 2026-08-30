@@ -322,6 +322,20 @@ from the CLI boundary onto it by downcasting to the typed errors. **Anything
 unclassified is `1`**: an unexpected I/O failure is not a configuration
 problem and must not be reported as one.
 
+A subcommand that has already printed its own diagnostics returns a summary
+error purely to carry the exit code; `CliError::already_reported` tells `main`
+not to render it again. `pudu config check` therefore prints one diagnostic per
+problem, a count line only when there is more than one, and — in `--format
+json` — nothing on stderr at all, since the envelope on stdout already carries
+`ok` and the error list.
+
+Every diagnostic is prefixed by its bare `code` line (`pudu::config::parse`).
+miette 7.6 emits it unconditionally whenever `code()` is `Some`, and it is
+worth its two lines: it is the only stable, prose-independent identifier a CI
+script or a bug report can grep. If field feedback disagrees, the escape hatch
+is a `Terse` newtype wrapping a `&dyn Diagnostic` and delegating everything
+except `code() -> None`. Not built.
+
 The codes are deliberately not printed in `--help`. The help output is already
 the densest surface in the tool, and a table of exit codes there would push the
 verb list further from the top for a fact that belongs in this spec.

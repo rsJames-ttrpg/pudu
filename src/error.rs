@@ -98,6 +98,14 @@ pub enum CliError {
 }
 
 impl CliError {
+    /// Whether the subcommand already printed the detail, so `main` must not
+    /// render this error a second time. `config check` prints one diagnostic
+    /// per problem (or the JSON envelope); the summary that follows would be
+    /// a third telling of the same news.
+    pub fn already_reported(&self) -> bool {
+        matches!(self, CliError::ConfigInvalid { .. })
+    }
+
     pub fn exit_code(&self) -> ExitCode {
         match self {
             CliError::Unimplemented { .. } => ExitCode::Unimplemented,
@@ -338,6 +346,13 @@ pub fn render(diagnostic: &dyn Diagnostic) -> String {
 
 /// Render an `anyhow` error from the CLI boundary, recovering its typed
 /// diagnostic when it has one so `code` and `help` reach the user.
+///
+/// **A typed error must carry its own complete message.** This renders the
+/// typed diagnostic found in the chain, so `.context(...)` added over a
+/// `CliError`/`ConfigError`/`DeriveError` is silently dropped from the
+/// output (it still classifies, since `downcast_ref` walks the chain). Use
+/// `.context()` over `io::Error` and friends; add a variant, or a field, when
+/// a typed error needs to say more.
 pub fn render_cli(err: &anyhow::Error) -> String {
     match as_diagnostic(err) {
         Some(d) => render(d),
@@ -421,6 +436,32 @@ mod tests {
             1,
             "the message must appear once:\n{}",
             render(&e)
+        );
+    }
+
+    /// Spec §6 promises rendering does not wrap, because pudu's messages name
+    /// absolute paths and Buck labels: at miette's default width of 80 a long
+    /// path is broken mid-segment across three lines, which is neither
+    /// greppable nor copy-pasteable.
+    #[test]
+    fn a_long_path_is_never_broken_across_lines() {
+        let path = format!(
+            "/tmp/{}/pnpm-lock.yaml",
+            (0..8)
+                .map(|i| format!("very-long-directory-segment-{i:02}"))
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        assert!(
+            path.len() > 100,
+            "the probe path must exceed any wrap width"
+        );
+        let out = render(&ConfigError::LockfileNotFound {
+            path: PathBuf::from(&path),
+        });
+        assert!(
+            out.lines().any(|l| l.contains(&path)),
+            "the path must survive on one line:\n{out}"
         );
     }
 

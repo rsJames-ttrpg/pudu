@@ -224,3 +224,66 @@ fn warnings_render_as_diagnostics() {
         "the warning names the platform:\n{stderr}"
     );
 }
+
+/// The count summary is only worth printing when the count is not already
+/// obvious: one rendered diagnostic needs no "1 error(s)" echo after it, and
+/// `main` must not re-render the summary error either.
+#[test]
+fn a_single_error_gets_no_count_summary_but_several_do() {
+    let one = project(Some(
+        "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"darwin\"\ncpu=\"arm64\"\nlibc=\"glibc\"\n[platforms.b]\nos=\"linux\"\ncpu=\"x64\"\n",
+    ));
+    let out = pudu(one.path()).args(["config", "check"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("error(s) in pudu.toml") && !stderr.contains("errors in pudu.toml"),
+        "a lone error needs no summary:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("pudu::config::").count(),
+        1,
+        "exactly one diagnostic, not an echoed summary:\n{stderr}"
+    );
+
+    let many = project(Some(
+        "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"darwin\"\ncpu=\"arm64\"\nlibc=\"glibc\"\n[platforms.b]\nos=\"win32\"\ncpu=\"x64\"\n",
+    ));
+    let out = pudu(many.path())
+        .args(["config", "check"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("2 errors in pudu.toml"),
+        "several errors are worth counting:\n{stderr}"
+    );
+}
+
+/// `--format json` puts everything CI needs on stdout, so stderr must stay
+/// clean rather than carrying a second, differently-shaped report.
+#[test]
+fn json_format_says_nothing_on_stderr() {
+    let d = project(Some(
+        "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"win32\"\ncpu=\"x64\"\nlibc=\"glibc\"\n",
+    ));
+    let out = pudu(d.path())
+        .args(["config", "check", "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.is_empty(), "stderr must be empty:\n{stderr}");
+}
+
+/// A missing `pudu.toml` must not be reported as "1 error(s) in pudu.toml" —
+/// a count of errors in a file that does not exist.
+#[test]
+fn a_missing_config_is_not_reported_as_a_count_of_errors_in_it() {
+    let d = project(None);
+    let out = pudu(d.path()).args(["config", "check"]).output().unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("cannot read"), "{stderr}");
+    assert!(!stderr.contains("error(s) in pudu.toml"), "{stderr}");
+}

@@ -3,7 +3,7 @@
 use clap::Parser;
 
 use pudu::cli::Cli;
-use pudu::error::{ExitCode, exit_code, render_cli};
+use pudu::error::{CliError, ExitCode, exit_code, render_cli};
 
 fn main() {
     // Diagnostics are rendered through miette (spec §6), so `code(...)` and
@@ -12,7 +12,15 @@ fn main() {
     let code = match Cli::parse().run() {
         Ok(()) => ExitCode::Ok,
         Err(e) => {
-            eprint!("{}", render_cli(&e));
+            // A subcommand that already printed its own diagnostics returns a
+            // summary purely to carry the exit code; rendering it here would
+            // repeat what the user just read.
+            if !e
+                .downcast_ref::<CliError>()
+                .is_some_and(CliError::already_reported)
+            {
+                eprint!("{}", render_cli(&e));
+            }
             exit_code(&e)
         }
     };

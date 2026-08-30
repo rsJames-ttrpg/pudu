@@ -433,3 +433,23 @@ fn no_usable_platforms_exits_three_and_surfaces_the_warnings() {
         "nothing is written when derivation fails"
     );
 }
+
+/// A `DeriveWarning` on the success path renders as the same diagnostic it
+/// does when it rides along on `DeriveError::NoUsablePlatforms` — one
+/// implementation of what a warning looks like, not two.
+#[test]
+fn success_path_warnings_render_as_diagnostics() {
+    let d = workspace(true);
+    std::fs::write(
+        d.path().join("pnpm-workspace.yaml"),
+        "supportedArchitectures:\n  os: [linux, win32]\n  cpu: [x64]\n",
+    )
+    .unwrap();
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("pudu::init::win32_skipped"),
+        "the diagnostic code must be shown:\n{stderr}"
+    );
+}

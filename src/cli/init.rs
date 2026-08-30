@@ -389,8 +389,10 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
         .transpose()?;
 
     let derived = derive_platforms(ws_text.as_deref())?;
+    // Through the shared renderer, so a `DeriveWarning` looks the same here
+    // as it does when it rides along on `DeriveError::NoUsablePlatforms`.
     for w in &derived.warnings {
-        eprintln!("warning: {w}");
+        eprint!("{}", crate::error::render(w));
     }
 
     let third_party_dir = crate::config::default_third_party_dir();

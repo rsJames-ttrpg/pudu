@@ -105,6 +105,11 @@ pub fn run(format: OutputFormat) -> anyhow::Result<()> {
         for e in &errors {
             eprint!("{}", render(e));
         }
+        // Only worth saying when the count is not obvious from the output
+        // above; `main` does not render this error (`already_reported`).
+        if errors.len() > 1 {
+            eprintln!("{} errors in pudu.toml", errors.len());
+        }
         return Err(CliError::ConfigInvalid {
             count: errors.len(),
         }
