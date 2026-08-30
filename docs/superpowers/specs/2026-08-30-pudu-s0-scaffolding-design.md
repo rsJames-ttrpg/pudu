@@ -26,7 +26,7 @@ pudu config check [-C PATH]        # validate pudu.toml in isolation
                   [--format json]
 pudu debug                         # subcommand group; no children at S0
 pudu --help                        # lists all phase-1 verbs
-pudu --version                     # version + build identifier
+pudu --version                     # crate version (build id deferred to S9)
 ```
 
 Registered but stubbed — each prints `error: pudu <verb> is not implemented yet (planned for S<n>); see docs/superpowers/specs/` and exits 2:
@@ -241,7 +241,7 @@ pub struct Config {
 }
 
 pub struct Platform {
-    pub os:          Os,                     // Linux | Darwin  (Win32 rejected in v1)
+    pub os:          Os,                     // Linux | Darwin | Win32
     pub cpu:         Cpu,                    // X64 | Arm64
     pub libc:        Option<Libc>,           // Glibc | Musl — Linux only
     pub constraints: Option<Vec<String>>,    // escape hatch, design §7
@@ -268,6 +268,8 @@ pub struct BuckConfig {
 
 `Os`, `Cpu`, and `Libc` live in `src/platform.rs` — S0 defines the types and their serde impls; S2 adds the npm-field matching and constraint-label mapping that consume them.
 
+`Os::Win32` is **representable but rejected as a platform**. npm packages declare `os: ["win32"]`, so S2 must parse the value when matching package fields; and having the variant lets validation reject a *configured* win32 platform with a message naming Windows as a Phase 2 deliverable, rather than an opaque serde `unknown variant` error.
+
 `BTreeMap`/`BTreeSet` throughout, not `HashMap`, so iteration order is deterministic — a precondition for the byte-stable output the design requires (§5 invariants).
 
 ---
@@ -292,9 +294,9 @@ src/
 ├── lib.rs                # pub mod cli, config, error, platform
 ├── cli/
 │   ├── mod.rs            # clap derive structs, dispatcher
-│   ├── init.rs           # pudu init (incl. toolchain append logic)
+│   ├── init.rs           # pudu init: detection, derivation, file writing
+│   ├── toolchain.rs      # toolchains/BUCK append state machine
 │   ├── config_check.rs   # pudu config check
-│   ├── debug.rs          # debug group, no children at S0
 │   └── stub.rs           # UNIMPLEMENTED verb registration
 ├── config.rs             # pudu.toml parsing + Config
 ├── platform.rs           # Os/Cpu/Libc types (matching logic lands in S2)
@@ -303,7 +305,9 @@ src/
 
 No other modules are created. `lib.rs` re-exports only what S0 needs.
 
-Note `init.rs` will be the largest file, since it carries detection, templating, and the toolchain-append state machine. If it passes ~350 lines, split the toolchain logic into `cli/toolchain.rs` — the append state machine is independently testable and has a clean boundary.
+The toolchain-append state machine is split into `cli/toolchain.rs` from the start rather than living in `init.rs`. It has a clean boundary, it is the one piece that writes to a user-owned file, and expressing it as a pure function over file contents makes every row of the §3.3 table a unit test with no filesystem involved.
+
+There is no `cli/debug.rs`: the `debug` group has no subcommands at S0, so it is a single arm in the dispatcher. S1 promotes it to its own module when `print-graph` lands.
 
 ---
 
@@ -338,7 +342,7 @@ The existing three-runner workflow covers S0 unchanged. No new jobs.
 3. `supportedArchitectures` expansion is correct, including the darwin-libc filter, the `win32` warning, and `current` resolution.
 4. `pudu init` refuses to overwrite `pudu.toml` without `--force`.
 5. The toolchain append satisfies every row of §3.3; three consecutive runs leave `toolchains/BUCK` byte-identical; a pre-existing node toolchain is left untouched and recorded in `pudu.toml`.
-6. `pudu --help` lists all phase-1 verbs with unimplemented ones marked; `pudu --version` prints version plus a build identifier.
+6. `pudu --help` lists all phase-1 verbs with unimplemented ones marked; `pudu --version` prints the crate version. (A build identifier needs a `build.rs`; deferred to S9 with the rest of the version-string polish.)
 7. `pudu config check` accepts a good config and rejects each of the ten §4 classes with an error naming the field or file.
 8. `pudu debug` with no subcommand errors and exits 2; every stubbed verb reports its planned stage and exits 2.
 9. CI green on all three runners: build, test, clippy `-D warnings`, fmt `--check`.
@@ -361,5 +365,5 @@ The existing three-runner workflow covers S0 unchanged. No new jobs.
 - S1 adds `pudu debug print-graph` under the `debug` namespace.
 - S2 adds `pudu debug platforms`, and extends `src/platform.rs` with npm-field matching plus constraint-label mapping.
 - S3 makes `--no-network` and `--check` meaningful.
-- S9 revisits `--help` formatting and the version string for the v0.1.0 polish pass.
+- S9 revisits `--help` formatting and the version string for the v0.1.0 polish pass, including adding a build identifier (git sha via `build.rs`).
 - `pudu init --interactive` is deliberately deferred; revisit only if init's detection proves insufficient in practice.
