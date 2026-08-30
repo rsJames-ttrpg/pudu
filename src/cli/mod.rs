@@ -1,5 +1,6 @@
 //! CLI surface and dispatch.
 
+pub mod config_check;
 pub mod stub;
 
 use std::path::PathBuf;
@@ -94,7 +95,9 @@ impl Cli {
 
         match self.command {
             Commands::Init { .. } => Err(stub::unimplemented("init", "S0 Task 8")),
-            Commands::Config { .. } => Err(stub::unimplemented("config check", "S0 Task 6")),
+            Commands::Config { command } => match command {
+                ConfigCommands::Check { format } => config_check::run(&format),
+            },
             Commands::Vendor { .. } => Err(stub::unimplemented("vendor", "S3")),
             Commands::Buckify { .. } => Err(stub::unimplemented("buckify", "S4")),
             Commands::Fixups => Err(stub::unimplemented("fixups", "S7/S8")),
