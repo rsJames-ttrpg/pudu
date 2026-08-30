@@ -174,7 +174,15 @@ fn parse_fixup_registry(value: &str) -> Result<FixupRegistry> {
         return Ok(FixupRegistry::None);
     }
     if let Some(rest) = value.strip_prefix("file://") {
-        return Ok(FixupRegistry::File(PathBuf::from(rest)));
+        // TD-S0-03: `file://` with nothing after it, or a relative path,
+        // would resolve against whatever directory pudu happens to run in.
+        let path = PathBuf::from(rest);
+        if rest.is_empty() || !path.is_absolute() {
+            return Err(ConfigError::BadFixupRegistryPath {
+                value: value.to_string(),
+            });
+        }
+        return Ok(FixupRegistry::File(path));
     }
     if let Some(rest) = value.strip_prefix("github.com/") {
         let mut parts = rest.split('/');
@@ -280,6 +288,23 @@ impl Config {
                 });
             } else {
                 seen.insert(key, name);
+            }
+        }
+
+        // Registries are fetched over the network at S3, so a `file://` or
+        // `ftp://` registry would turn a config value into an arbitrary-path
+        // read or an unvetted transport (spec §4.7).
+        for (key, url) in std::iter::once(("default".to_string(), &self.registry.default)).chain(
+            self.registry
+                .scopes
+                .iter()
+                .map(|(scope, url)| (scope.clone(), url)),
+        ) {
+            if !matches!(url.scheme(), "http" | "https") {
+                errors.push(ConfigError::BadRegistryUrl {
+                    key,
+                    url: url.to_string(),
+                });
             }
         }
 
@@ -629,6 +654,75 @@ registry_rev = "deadbeef"
                 .any(|e| matches!(e, ConfigError::BadRegistryScope { .. })),
             "{errors:?}"
         );
+    }
+
+    /// I2: spec §4.7 requires absolute http(s) registry URLs. `file://`
+    /// would make a blessed config an arbitrary-path read once S3 starts
+    /// fetching tarballs from it.
+    #[test]
+    fn rejects_non_http_registry_urls() {
+        let d = tempdir_with_lockfile();
+        for url in [
+            "ftp://evil.example.com",
+            "file:///etc/passwd",
+            "data:text/plain,x",
+        ] {
+            let c = cfg(&format!(
+                "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"linux\"\ncpu=\"x64\"\n[registry]\ndefault=\"{url}\"\n"
+            ));
+            let (errors, _) = c.validate(d.path());
+            assert!(
+                errors.iter().any(|e| matches!(
+                    e,
+                    ConfigError::BadRegistryUrl { key, .. } if key == "default"
+                )),
+                "must reject {url}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_http_scope_registry_and_names_the_scope() {
+        let d = tempdir_with_lockfile();
+        let c = cfg(
+            "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"linux\"\ncpu=\"x64\"\n[registry]\n\"@myorg\"=\"file:///etc/passwd\"\n",
+        );
+        let (errors, _) = c.validate(d.path());
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ConfigError::BadRegistryUrl { key, .. } if key == "@myorg"
+            )),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_http_and_https_registries() {
+        let d = tempdir_with_lockfile();
+        for url in ["http://npm.internal:4873", "https://npm.example.com/path"] {
+            let c = cfg(&format!(
+                "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"linux\"\ncpu=\"x64\"\nlibc=\"glibc\"\n[platforms.b]\nos=\"darwin\"\ncpu=\"arm64\"\n[registry]\ndefault=\"{url}\"\n"
+            ));
+            let (errors, _) = c.validate(d.path());
+            assert!(errors.is_empty(), "for {url}: {errors:?}");
+        }
+    }
+
+    /// TD-S0-03: a `file://` fixup registry with an empty or relative path
+    /// resolves against whatever directory pudu happens to run in.
+    #[test]
+    fn rejects_empty_or_relative_file_fixup_registry() {
+        for input in ["file://", "file://relative/path", "file://./reg"] {
+            let text = format!(
+                "lockfile_path=\"x\"\n[platforms.p]\nos=\"linux\"\ncpu=\"x64\"\n[fixups]\nregistry=\"{input}\"\n"
+            );
+            let err = Config::from_str(&text, Path::new("pudu.toml")).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::BadFixupRegistryPath { .. }),
+                "for input {input}: {err:?}"
+            );
+        }
     }
 
     #[test]

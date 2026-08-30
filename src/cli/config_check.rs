@@ -4,32 +4,67 @@ use std::path::Path;
 
 use crate::config::Config;
 
+/// Output format for `pudu config check`.
+///
+/// A `ValueEnum` rather than a string so clap rejects unknown formats before
+/// any work happens (and documents the valid ones in `--help`): reading
+/// `pudu.toml` first made `--format xml` report a missing config instead of
+/// the bad format.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    Human,
+    Json,
+}
+
+/// Print the JSON envelope CI consumes.
+fn emit_json(errors: &[String], warnings: &[String]) -> anyhow::Result<()> {
+    let obj = serde_json::json!({
+        "ok": errors.is_empty(),
+        "errors": errors,
+        "warnings": warnings,
+    });
+    println!("{}", serde_json::to_string_pretty(&obj)?);
+    Ok(())
+}
+
+/// Report a failure that happened before validation could run.
+///
+/// In JSON mode this still goes out as the envelope: a missing or malformed
+/// `pudu.toml` is exactly the case `--format json` exists for, and emitting
+/// nothing on stdout there makes `pudu config check --format json | jq -e .ok`
+/// a parse error rather than `false`.
+fn fail_early(json: bool, message: String) -> anyhow::Result<()> {
+    if json {
+        emit_json(std::slice::from_ref(&message), &[])?;
+        anyhow::bail!("1 error(s) in pudu.toml");
+    }
+    Err(anyhow::anyhow!(message))
+}
+
 /// Validate `pudu.toml` in the current directory.
 ///
-/// `format` is `"human"` or `"json"`. JSON goes to stdout in both the ok and
-/// error cases so CI can parse it; human-readable errors go to stderr.
-pub fn run(format: &str) -> anyhow::Result<()> {
+/// JSON goes to stdout in both the ok and error cases so CI can parse it;
+/// human-readable errors go to stderr.
+pub fn run(format: OutputFormat) -> anyhow::Result<()> {
+    let json = format == OutputFormat::Json;
     let path = Path::new("pudu.toml");
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
 
-    let config = Config::from_str(&text, path)?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => return fail_early(json, format!("cannot read {}: {e}", path.display())),
+    };
+
+    let config = match Config::from_str(&text, path) {
+        Ok(c) => c,
+        Err(e) => return fail_early(json, format!("{e}: {}", e.source_message())),
+    };
+
     let base = std::env::current_dir()?;
     let (errors, warnings) = config.validate(&base);
 
-    let json = match format {
-        "human" => false,
-        "json" => true,
-        other => anyhow::bail!("unknown --format `{other}` (expected \"human\" or \"json\")"),
-    };
-
     if json {
-        let obj = serde_json::json!({
-            "ok": errors.is_empty(),
-            "errors": errors.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
-            "warnings": warnings,
-        });
-        println!("{}", serde_json::to_string_pretty(&obj)?);
+        let errors: Vec<String> = errors.iter().map(|e| format!("{e:#}")).collect();
+        emit_json(&errors, &warnings)?;
         if errors.is_empty() {
             return Ok(());
         }

@@ -56,6 +56,20 @@ pub enum ConfigError {
     )]
     BadFixupRegistry { value: String },
 
+    #[error("registry `{key}` is `{url}`, which is not an http(s) URL")]
+    #[diagnostic(
+        code(pudu::config::bad_registry_url),
+        help("registries are fetched over the network; use an absolute http:// or https:// URL")
+    )]
+    BadRegistryUrl { key: String, url: String },
+
+    #[error("`[fixups].registry` value `{value}` has no absolute path after `file://`")]
+    #[diagnostic(
+        code(pudu::config::bad_fixup_registry_path),
+        help("use `file:///absolute/path/to/registry`")
+    )]
+    BadFixupRegistryPath { value: String },
+
     #[error("`[scripts].allow` entry `{name}` is not a valid npm package name")]
     #[diagnostic(code(pudu::config::bad_package_name))]
     BadPackageName { name: String },

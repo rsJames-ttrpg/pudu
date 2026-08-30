@@ -82,8 +82,8 @@ pub enum ConfigCommands {
     /// Validate pudu.toml.
     Check {
         /// Output format.
-        #[arg(long, value_name = "FORMAT", default_value = "human")]
-        format: String,
+        #[arg(long, value_name = "FORMAT", value_enum, default_value_t = config_check::OutputFormat::Human)]
+        format: config_check::OutputFormat,
     },
 }
 
@@ -98,7 +98,7 @@ impl Cli {
         match self.command {
             Commands::Init { force, path } => init::run(force, path),
             Commands::Config { command } => match command {
-                ConfigCommands::Check { format } => config_check::run(&format),
+                ConfigCommands::Check { format } => config_check::run(format),
             },
             Commands::Vendor { .. } => Err(stub::unimplemented("vendor", "S3")),
             Commands::Buckify { .. } => Err(stub::unimplemented("buckify", "S4")),
