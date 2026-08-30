@@ -200,21 +200,31 @@ fn force_never_overwrites_hand_edited_third_party_js_contents() {
 /// IMPORTANT: a relative `[PATH]` argument must detect the same lockfile a
 /// bare `pudu init` run from the target directory would find, ascending
 /// above the process cwd when necessary.
+///
+/// The lockfile sits TWO levels above the `[PATH]` argument (workspace root
+/// -> proj -> proj/sub), not one: with only one level, `detect("sub")`'s
+/// upward walk terminates at `""`, and `"".join("pnpm-lock.yaml")` resolves
+/// against the process cwd -- which in a one-level layout happens to BE the
+/// directory holding the lockfile, masking the bug this regression test
+/// exists to catch. Process cwd is `proj`; `[PATH]` is `sub`, so `detect`
+/// must ascend past `proj` to the workspace root to find the lockfile.
 #[test]
 fn relative_path_argument_detects_lockfile_above_it() {
-    let d = workspace(true); // lockfile at d.path()/pnpm-lock.yaml
-    fs::create_dir_all(d.path().join("sub")).unwrap();
+    let d = tempfile::tempdir().unwrap();
+    fs::write(d.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+    let proj = d.path().join("proj");
+    fs::create_dir_all(proj.join("sub")).unwrap();
 
-    let out = pudu(d.path()).args(["init", "sub"]).output().unwrap();
+    let out = pudu(&proj).args(["init", "sub"]).output().unwrap();
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let cfg = fs::read_to_string(d.path().join("sub/pudu.toml")).unwrap();
+    let cfg = fs::read_to_string(proj.join("sub/pudu.toml")).unwrap();
     assert!(
-        cfg.contains("lockfile_path   = \"../pnpm-lock.yaml\""),
+        cfg.contains("lockfile_path   = \"../../pnpm-lock.yaml\""),
         "{cfg}"
     );
 }
