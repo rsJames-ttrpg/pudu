@@ -154,4 +154,97 @@ fn undetected_project_writes_a_todo_template() {
     );
     let cfg = fs::read_to_string(d.path().join("pudu.toml")).unwrap();
     assert!(cfg.contains("TODO"), "{cfg}");
+    // The lockfile_path *value* itself, not just the banner comment, must
+    // carry the TODO placeholder.
+    assert!(
+        cfg.contains("lockfile_path   = \"TODO: path to your pnpm-lock.yaml\""),
+        "{cfg}"
+    );
+}
+
+/// CRITICAL: `--force` narrows to `pudu.toml` and the `toolchains/BUCK`
+/// managed block only (spec change, commit f4c5b0c) — files under
+/// third-party/js/ are user-owned once they exist and must never be
+/// overwritten, `--force` or not.
+#[test]
+fn force_never_overwrites_hand_edited_third_party_js_contents() {
+    let d = workspace(true);
+    pudu(d.path()).arg("init").output().unwrap();
+
+    let bzl_path = d.path().join("third-party/js/toolchains.bzl");
+    let buck_path = d.path().join("third-party/js/BUCK");
+    let hand_edited_bzl = "# hand-edited by a user\nsystem_node_toolchain = 1\n";
+    let hand_edited_buck = "# hand-edited BUCK\n";
+    fs::write(&bzl_path, hand_edited_bzl).unwrap();
+    fs::write(&buck_path, hand_edited_buck).unwrap();
+
+    let out = pudu(d.path()).args(["init", "--force"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        fs::read_to_string(&bzl_path).unwrap(),
+        hand_edited_bzl,
+        "third-party/js/toolchains.bzl must survive --force untouched"
+    );
+    assert_eq!(
+        fs::read_to_string(&buck_path).unwrap(),
+        hand_edited_buck,
+        "third-party/js/BUCK must survive --force untouched"
+    );
+}
+
+/// IMPORTANT: a relative `[PATH]` argument must detect the same lockfile a
+/// bare `pudu init` run from the target directory would find, ascending
+/// above the process cwd when necessary.
+#[test]
+fn relative_path_argument_detects_lockfile_above_it() {
+    let d = workspace(true); // lockfile at d.path()/pnpm-lock.yaml
+    fs::create_dir_all(d.path().join("sub")).unwrap();
+
+    let out = pudu(d.path()).args(["init", "sub"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let cfg = fs::read_to_string(d.path().join("sub/pudu.toml")).unwrap();
+    assert!(
+        cfg.contains("lockfile_path   = \"../pnpm-lock.yaml\""),
+        "{cfg}"
+    );
+}
+
+/// IMPORTANT: without `--force`, a stale-but-parseable managed block already
+/// present in `toolchains/BUCK` (exactly one BEGIN/END pair, contents
+/// diverged from what pudu would generate today) must be left byte-for-byte
+/// alone. `pudu.toml` must not already exist, since that gate short-circuits
+/// `run()` before the toolchain logic runs at all — so this managed block is
+/// created directly rather than via a prior `pudu init`.
+#[test]
+fn non_force_run_leaves_a_stale_managed_block_alone() {
+    let d = workspace(true);
+    fs::create_dir_all(d.path().join("toolchains")).unwrap();
+    let stale_block = "# --- begin pudu-managed (do not edit inside this block) ---\n\
+         load(\"root//third-party/js:toolchains.bzl\", \"system_node_toolchain\")\n\
+         system_node_toolchain(name = \"node\", visibility = [\"//:x\"])\n\
+         # --- end pudu-managed ---\n";
+    fs::write(d.path().join("toolchains/BUCK"), stale_block).unwrap();
+
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        fs::read_to_string(d.path().join("toolchains/BUCK")).unwrap(),
+        stale_block,
+        "a non-force run must not refresh a stale managed block"
+    );
 }
