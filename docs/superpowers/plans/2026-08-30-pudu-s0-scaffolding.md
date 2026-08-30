@@ -12,7 +12,7 @@
 
 - Rust edition 2024, `rust-version = "1.88"` (the release that stabilized `let`-chains, which the code uses). Do not raise either without a deliberate reason — nothing in CI enforces the MSRV, so drift is silent.
 - `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` must pass. A pre-commit hook at `.claude/scripts/rust-precommit-gate.sh` enforces both and will block `git commit` on failure.
-- No new dependencies. Everything needed is already in `Cargo.toml`. If a task seems to need one, stop and ask.
+- No new dependencies, with one sanctioned exception: Task 6 adds `serde_json`, which the plan wrongly assumed was already present. Any other apparent need for a dependency means stop and ask.
 - **`BTreeMap` / `BTreeSet` everywhere, never `HashMap` / `HashSet`.** Deterministic iteration order is a precondition for the byte-stable output later stages require (design §5).
 - Every error message names a field or a file by path, and carries line/column where the source position is known (spec §6). This is contract, asserted by tests.
 - No business logic: no lockfile parsing, no tarball fetching, no BUCK emission. Those are S1–S4.
@@ -1425,7 +1425,7 @@ In `src/cli/mod.rs`: add `pub mod config_check;` beside `pub mod stub;`, and rep
             },
 ```
 
-`serde_json` is already a dependency.
+`serde_json` is required by this code and was NOT in the original dependency set — the plan asserted it was, incorrectly. Adding `serde_json` to `Cargo.toml` is a sanctioned exception to the no-new-dependencies constraint; it is the only one.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
