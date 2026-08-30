@@ -192,9 +192,11 @@ Same shape, with `lockfile_path = "TODO: path to your pnpm-lock.yaml"`, the defa
 ### Overwrite handling
 
 - `pudu.toml` exists → `error: pudu.toml already exists; pass --force to overwrite`, exit 2.
-- `third-party/js/` exists and is non-empty → warn, write nothing inside it, still write `pudu.toml`.
-- `toolchains/BUCK` → governed by the table in §3.3, which `--force` also affects.
-- `--force` bypasses the first two checks.
+- `third-party/js/` exists and is non-empty → warn, write nothing inside it, still write `pudu.toml`. **`--force` does not change this.**
+- `toolchains/BUCK` → governed by the table in §3.3, which `--force` does affect.
+- `--force` bypasses only the `pudu.toml` check.
+
+**`--force` is deliberately narrow: it governs `pudu.toml` and the `toolchains/BUCK` managed block, and nothing else.** An earlier draft let it overwrite `third-party/js/` wholesale, which silently destroyed hand edits to `toolchains.bzl` — a file whose own generated header invites editing. Users reach for `--force` to refresh their config; that must not carry a blast radius they did not ask for. Refreshing a stale generated scaffolding file is a manual delete, which is rare and explicit.
 
 ---
 

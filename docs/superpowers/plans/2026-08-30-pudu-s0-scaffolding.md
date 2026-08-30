@@ -2283,7 +2283,11 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
         ("fixups/.gitkeep", ""),
     ] {
         let p = tp.join(rel);
-        if p.exists() && !force {
+        // `--force` deliberately does NOT reach here: it governs pudu.toml and
+        // the toolchains/BUCK managed block only. Overwriting these would
+        // silently destroy hand edits to toolchains.bzl, whose own header
+        // invites editing.
+        if p.exists() {
             eprintln!("warning: {} exists; leaving it alone", p.display());
             continue;
         }
