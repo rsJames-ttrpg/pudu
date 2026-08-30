@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Rust edition 2024, `rust-version = "1.85"`. Do not raise either. In particular, **no `let`-chains** (`if let ... && ...`) — they need 1.88. Nothing in CI enforces the MSRV, so violations are silent.
+- Rust edition 2024, `rust-version = "1.88"` (the release that stabilized `let`-chains, which the code uses). Do not raise either without a deliberate reason — nothing in CI enforces the MSRV, so drift is silent.
 - `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` must pass. A pre-commit hook at `.claude/scripts/rust-precommit-gate.sh` enforces both and will block `git commit` on failure.
 - No new dependencies. Everything needed is already in `Cargo.toml`. If a task seems to need one, stop and ask.
 - **`BTreeMap` / `BTreeSet` everywhere, never `HashMap` / `HashSet`.** Deterministic iteration order is a precondition for the byte-stable output later stages require (design §5).
@@ -695,12 +695,11 @@ fn parse_fixup_registry(value: &str) -> Result<FixupRegistry> {
     }
     if let Some(rest) = value.strip_prefix("github.com/") {
         let mut parts = rest.split('/');
-        // No `let`-chains here: they stabilized in Rust 1.88 and this crate
-        // declares rust-version = "1.85".
-        if let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next()) {
-            if !owner.is_empty() && !repo.is_empty() {
-                return Ok(FixupRegistry::Github { owner: owner.into(), repo: repo.into() });
-            }
+        if let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next())
+            && !owner.is_empty()
+            && !repo.is_empty()
+        {
+            return Ok(FixupRegistry::Github { owner: owner.into(), repo: repo.into() });
         }
     }
     Err(ConfigError::BadFixupRegistry { value: value.to_string() })
@@ -2430,12 +2429,11 @@ git commit -m "chore(s0): mark S0 shipped in the roadmap"
 
 **Read the spec.** This plan implements `docs/superpowers/specs/2026-08-30-pudu-s0-scaffolding-design.md`. Where the plan and the spec disagree, the spec wins — say so rather than silently following the plan.
 
-**Do not use `let`-chains.** `if let ... && ...` stabilized in Rust 1.88, but this
-crate declares `rust-version = "1.85"`. Your local toolchain will accept them
-and CI (on stable) will too, so the breakage is silent — the declared MSRV would
-simply be wrong. Use nested `if`s. The same applies to any other post-1.85
-feature: if you want one, raise `rust-version` deliberately in its own commit
-rather than letting it drift.
+**MSRV is 1.88**, chosen because that is where `let`-chains (`if let ... && ...`)
+stabilized; Task 3 uses one. Nothing in CI checks the MSRV, so if you reach for a
+newer feature, raise `rust-version` in the same commit rather than letting the
+declared floor quietly become a lie. Do not set it above the current stable
+release — CI builds on stable and cargo refuses a toolchain older than the floor.
 
 **Testing style.** Unit tests live in `#[cfg(test)] mod tests` inside the module they test; integration tests live in `tests/` and drive the real binary through `assert_cmd`. Test names state the behaviour, not the function name. Assertions carry the offending value in their message — every `assert!` above does this, and new ones should too.
 

@@ -2,7 +2,7 @@
 name          = "pudu"
 version       = "0.1.0"
 edition       = "2024"
-rust-version  = "1.85"
+rust-version  = "1.88"
 description   = "Translate pnpm-lock.yaml into Buck2 build rules"
 authors       = ["Jack Mayo <jackomayo@gmail.com>"]
 license       = "MIT"
