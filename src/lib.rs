@@ -3,3 +3,4 @@
 //! No public API is committed in v1.
 
 pub mod error;
+pub mod platform;
