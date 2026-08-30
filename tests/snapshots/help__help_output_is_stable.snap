@@ -1,0 +1,25 @@
+---
+source: tests/help.rs
+expression: text
+---
+Translate pnpm-lock.yaml into Buck2 build rules
+
+Usage: pudu [OPTIONS] <COMMAND>
+
+Commands:
+  init     Scaffold a pudu project
+  config   Inspect pudu.toml
+  vendor   Fetch tarballs and write pudu.lock. [UNIMPLEMENTED — S3]
+  buckify  Emit BUCK, pudu.bzl, and config/BUCK. [UNIMPLEMENTED — S4]
+  fixups   Manage the community fixup registry. [UNIMPLEMENTED — S7/S8]
+  audit    Cross-check the lockfile against advisories. [UNIMPLEMENTED — Phase 2]
+  unused   Report unreferenced vendored tarballs. [UNIMPLEMENTED — Phase 2]
+  debug    Developer inspection commands
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -C <PATH>         Change to this directory before running
+  -v, --verbose...  Increase log verbosity (-v, -vv)
+      --no-network  Forbid all network access. (No effect until S3.)
+  -h, --help        Print help
+  -V, --version     Print version

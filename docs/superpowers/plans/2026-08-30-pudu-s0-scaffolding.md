@@ -12,7 +12,7 @@
 
 - Rust edition 2024, `rust-version = "1.88"` (the release that stabilized `let`-chains, which the code uses). Do not raise either without a deliberate reason — nothing in CI enforces the MSRV, so drift is silent.
 - `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` must pass. A pre-commit hook at `.claude/scripts/rust-precommit-gate.sh` enforces both and will block `git commit` on failure.
-- No new dependencies. Everything needed is already in `Cargo.toml`. If a task seems to need one, stop and ask.
+- No new dependencies, with one sanctioned exception: Task 6 adds `serde_json`, which the plan wrongly assumed was already present. Any other apparent need for a dependency means stop and ask.
 - **`BTreeMap` / `BTreeSet` everywhere, never `HashMap` / `HashSet`.** Deterministic iteration order is a precondition for the byte-stable output later stages require (design §5).
 - Every error message names a field or a file by path, and carries line/column where the source position is known (spec §6). This is contract, asserted by tests.
 - No business logic: no lockfile parsing, no tarball fetching, no BUCK emission. Those are S1–S4.
@@ -59,14 +59,12 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn missing_field_error_names_the_field_and_file() {
-        let e = ConfigError::MissingField {
-            path: PathBuf::from("/repo/pudu.toml"),
-            field: "lockfile_path",
+    fn lockfile_not_found_names_the_resolved_path() {
+        let e = ConfigError::LockfileNotFound {
+            path: PathBuf::from("/repo/pnpm-lock.yaml"),
         };
         let msg = e.to_string();
-        assert!(msg.contains("lockfile_path"), "message must name the field: {msg}");
-        assert!(msg.contains("/repo/pudu.toml"), "message must name the file: {msg}");
+        assert!(msg.contains("/repo/pnpm-lock.yaml"), "message must name the file: {msg}");
     }
 
     #[test]
@@ -120,10 +118,6 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
-
-    #[error("{path}: missing required field `{field}`")]
-    #[diagnostic(code(pudu::config::missing_field))]
-    MissingField { path: PathBuf, field: &'static str },
 
     #[error("platform `{platform}`: `libc` applies only to linux")]
     #[diagnostic(
@@ -191,9 +185,6 @@ pub enum ConfigError {
     )]
     NoPlatforms,
 
-    #[error("{path}: {message}")]
-    #[diagnostic(code(pudu::config::io))]
-    Io { path: PathBuf, message: String },
 }
 
 impl ConfigError {
@@ -1434,7 +1425,7 @@ In `src/cli/mod.rs`: add `pub mod config_check;` beside `pub mod stub;`, and rep
             },
 ```
 
-`serde_json` is already a dependency.
+`serde_json` is required by this code and was NOT in the original dependency set — the plan asserted it was, incorrectly. Adding `serde_json` to `Cargo.toml` is a sanctioned exception to the no-new-dependencies constraint; it is the only one.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -2292,7 +2283,11 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
         ("fixups/.gitkeep", ""),
     ] {
         let p = tp.join(rel);
-        if p.exists() && !force {
+        // `--force` deliberately does NOT reach here: it governs pudu.toml and
+        // the toolchains/BUCK managed block only. Overwriting these would
+        // silently destroy hand edits to toolchains.bzl, whose own header
+        // invites editing.
+        if p.exists() {
             eprintln!("warning: {} exists; leaving it alone", p.display());
             continue;
         }

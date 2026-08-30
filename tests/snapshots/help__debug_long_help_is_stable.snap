@@ -1,0 +1,16 @@
+---
+source: tests/help.rs
+expression: text
+---
+Developer inspection commands
+
+Usage: pudu debug [OPTIONS] [ARGS]...
+
+Arguments:
+  [ARGS]...  
+
+Options:
+  -C <PATH>         Change to this directory before running
+  -v, --verbose...  Increase log verbosity (-v, -vv)
+      --no-network  Forbid all network access. (No effect until S3.)
+  -h, --help        Print help

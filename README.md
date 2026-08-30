@@ -14,7 +14,9 @@ pudu is the world's smallest deer. reindeer does Cargo, muntjac does uv, pudu do
 
 ## Status
 
-**Pre-implementation.** The design and roadmap are written; code starts at S0. See the [design spec](docs/superpowers/specs/2026-08-30-pudu-design.md) and [roadmap](docs/superpowers/specs/2026-08-30-pudu-roadmap.md).
+**S0 has shipped: the CLI skeleton and project scaffolding.** `pudu init` detects a pnpm workspace, derives a platform matrix from `supportedArchitectures`, and writes `pudu.toml`, a `third-party/js/` skeleton, and a marker-delimited Node toolchain into `toolchains/BUCK`. `pudu config check` validates `pudu.toml`, in human or JSON output.
+
+**Nothing else works yet.** pudu cannot parse a lockfile, resolve platforms, fetch tarballs, or emit BUCK: `vendor`, `buckify`, `fixups`, `audit`, and `unused` are listed in `--help` and exit 2 with the stage that will implement them. S1 (lockfile parsing) is next. See the [design spec](docs/superpowers/specs/2026-08-30-pudu-design.md) and [roadmap](docs/superpowers/specs/2026-08-30-pudu-roadmap.md).
 
 ## Planned quickstart
 
