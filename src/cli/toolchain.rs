@@ -45,12 +45,18 @@ pub enum AppendOutcome {
 /// line of manual instruction, while a false negative produces a duplicate
 /// target and a confusing Buck error.
 fn existing_node_toolchain(text: &str) -> Option<String> {
+    const NAME: &str = "system_node_toolchain";
     for line in text.lines() {
         let l = line.trim();
         if l.starts_with('#') {
             continue;
         }
-        if l.starts_with("system_node_toolchain(") {
+        // Look for the call anywhere on the line (e.g. `x =
+        // system_node_toolchain(...)`), tolerating whitespace before the
+        // opening paren (e.g. `system_node_toolchain (...)`).
+        if let Some(idx) = l.find(NAME)
+            && l[idx + NAME.len()..].trim_start().starts_with('(')
+        {
             return Some("node".to_string());
         }
     }
@@ -61,15 +67,21 @@ fn existing_node_toolchain(text: &str) -> Option<String> {
 ///
 /// Returns `(None, outcome)` when nothing should be written.
 pub fn apply(existing: Option<&str>, block: &str, force: bool) -> (Option<String>, AppendOutcome) {
-    let Some(text) = existing else {
-        return (Some(block.to_string()), AppendOutcome::Created);
+    let text = match existing {
+        None => return (Some(block.to_string()), AppendOutcome::Created),
+        // An empty file is the same logical state as an absent one: produce
+        // byte-identical output either way.
+        Some("") => return (Some(block.to_string()), AppendOutcome::Created),
+        Some(text) => text,
     };
 
+    let begin_count = text.matches(BEGIN).count();
+    let end_count = text.matches(END).count();
     let begin = text.find(BEGIN);
     let end = text.find(END);
 
-    match (begin, end) {
-        (Some(b), Some(e)) if e > b => {
+    match (begin_count, end_count, begin, end) {
+        (1, 1, Some(b), Some(e)) if e > b => {
             if !force {
                 return (None, AppendOutcome::AlreadyManaged);
             }
@@ -84,7 +96,7 @@ pub fn apply(existing: Option<&str>, block: &str, force: bool) -> (Option<String
             out.push_str(&text[tail..]);
             (Some(out), AppendOutcome::Replaced)
         }
-        (None, None) => {
+        (0, 0, None, None) => {
             if let Some(name) = existing_node_toolchain(text) {
                 return (None, AppendOutcome::ExistingToolchain(name));
             }
@@ -96,7 +108,9 @@ pub fn apply(existing: Option<&str>, block: &str, force: bool) -> (Option<String
             out.push_str(block);
             (Some(out), AppendOutcome::Appended)
         }
-        // Exactly one marker, or END before BEGIN: refuse to guess.
+        // Anything else is unbalanced: not exactly one BEGIN and one END, or
+        // END before BEGIN. Refuse to guess — a false Unparseable costs one
+        // printed instruction; a false Replaced/Appended can destroy content.
         _ => (None, AppendOutcome::Unparseable),
     }
 }
@@ -131,6 +145,17 @@ mod tests {
         assert!(text.contains(BEGIN));
     }
 
+    /// M4: exact-content check. `contains`-based assertions can't see a
+    /// missing (or extra) blank line before the appended block.
+    #[test]
+    fn append_produces_exact_expected_bytes() {
+        let existing = "system_python_toolchain(name = \"python\")\n";
+        let (written, outcome) = apply(Some(existing), &block(), false);
+        assert!(matches!(outcome, AppendOutcome::Appended));
+        let expected = format!("{existing}\n{}", block());
+        assert_eq!(written.unwrap(), expected);
+    }
+
     #[test]
     fn never_appends_over_an_existing_node_toolchain() {
         let existing = "system_node_toolchain(name = \"node\")\n";
@@ -140,6 +165,34 @@ mod tests {
             AppendOutcome::ExistingToolchain(t) => assert_eq!(t, "node"),
             other => panic!("expected ExistingToolchain, got {other:?}"),
         }
+    }
+
+    /// MINOR 5: false negatives are the expensive direction (a duplicate
+    /// Buck target and a confusing error), so unusual-but-plausible spacing
+    /// and a bound-to-a-variable call must still be detected.
+    #[test]
+    fn detects_node_toolchain_with_unusual_spacing_or_assignment() {
+        for existing in [
+            "system_node_toolchain (name = \"node\")\n",
+            "x = system_node_toolchain(name = \"node\")\n",
+        ] {
+            let (written, outcome) = apply(Some(existing), &block(), false);
+            assert!(written.is_none(), "must not write over {existing:?}");
+            assert!(
+                matches!(outcome, AppendOutcome::ExistingToolchain(_)),
+                "expected ExistingToolchain for {existing:?}, got {outcome:?}"
+            );
+        }
+    }
+
+    /// M2: a commented-out declaration must not count as a real one — the
+    /// doc comment on `existing_node_toolchain` calls this out explicitly.
+    #[test]
+    fn commented_out_node_toolchain_is_not_detected() {
+        let existing = "# system_node_toolchain(name = \"node\")\n";
+        let (written, outcome) = apply(Some(existing), &block(), false);
+        assert!(matches!(outcome, AppendOutcome::Appended));
+        assert!(written.is_some());
     }
 
     #[test]
@@ -169,22 +222,120 @@ mod tests {
         );
         assert!(!text.contains("stale content"));
         assert!(text.contains("system_node_toolchain"));
+
+        // M3: exact-content check. `contains` alone can't see an extra
+        // blank line left behind if END's trailing newline isn't consumed.
+        let expected = format!("before = 1\n{}after = 2\n", block());
+        assert_eq!(text, expected);
     }
 
+    /// CRITICAL 1 (reviewer probe): two BEGIN markers and one END is
+    /// unbalanced. Presence-only detection (`find`, first occurrence) would
+    /// route this to the replace path and destroy everything between the
+    /// first BEGIN and the END — including content the user owns that sits
+    /// between the two BEGIN lines. Must be Unparseable, and must not write.
+    #[test]
+    fn two_begin_markers_and_one_end_are_unparseable() {
+        let existing = format!(
+            "{BEGIN}\n\
+             load(\"old\", \"system_node_toolchain\")\n\
+             MY_IMPORTANT_RULE = 1\n\
+             system_python_toolchain(name = \"python\")\n\
+             {BEGIN}\n\
+             load(\"new\", \"system_node_toolchain\")\n\
+             {END}\n\
+             after = 2\n"
+        );
+        let (written, outcome) = apply(Some(&existing), &block(), true);
+        assert!(
+            written.is_none(),
+            "must not write when markers are unbalanced"
+        );
+        assert!(matches!(outcome, AppendOutcome::Unparseable));
+    }
+
+    /// IMPORTANT 2: two *complete* managed blocks. Buck would reject the
+    /// duplicate `system_node_toolchain` target; pudu must refuse to guess
+    /// which one is authoritative rather than silently picking one.
+    #[test]
+    fn two_complete_managed_blocks_are_unparseable() {
+        let existing = format!("{}middle = 1\n{}", block(), block());
+        let (written, outcome) = apply(Some(&existing), &block(), false);
+        assert!(written.is_none());
+        assert!(matches!(outcome, AppendOutcome::Unparseable));
+
+        let (written, outcome) = apply(Some(&existing), &block(), true);
+        assert!(
+            written.is_none(),
+            "force must not pick one of two blocks to rewrite"
+        );
+        assert!(matches!(outcome, AppendOutcome::Unparseable));
+    }
+
+    /// M1: END appearing before BEGIN, with exactly one of each, must not
+    /// slip past the marker-count check into the replace arm.
+    #[test]
+    fn end_marker_before_begin_marker_is_unparseable() {
+        let existing = format!("{END}\nmiddle\n{BEGIN}\n");
+        let (written, outcome) = apply(Some(&existing), &block(), true);
+        assert!(written.is_none());
+        assert!(matches!(outcome, AppendOutcome::Unparseable));
+    }
+
+    /// IMPORTANT 4: the original version of this test cloned `first` from
+    /// `current` and then never reassigned `current`, so the final
+    /// `assert_eq!` compared a value against itself and could not fail by
+    /// construction. This version drives three real `apply` calls off a
+    /// fixed baseline and asserts each of the latter two actually reports
+    /// "no change needed" rather than just not panicking.
     #[test]
     fn is_idempotent_across_three_runs() {
-        let mut current: Option<String> = None;
-        for _ in 0..3 {
-            let (written, _) = apply(current.as_deref(), &block(), false);
-            if let Some(t) = written {
-                current = Some(t);
-            }
+        let (first_written, first_outcome) = apply(None, &block(), false);
+        assert!(matches!(first_outcome, AppendOutcome::Created));
+        let stable = first_written.unwrap();
+
+        for _ in 0..2 {
+            let (written, outcome) = apply(Some(&stable), &block(), false);
+            assert!(written.is_none(), "content must not change on repeat runs");
+            assert!(matches!(outcome, AppendOutcome::AlreadyManaged));
         }
-        let first = current.clone().unwrap();
-        let (written, outcome) = apply(current.as_deref(), &block(), false);
-        assert!(written.is_none());
-        assert!(matches!(outcome, AppendOutcome::AlreadyManaged));
-        assert_eq!(first, current.unwrap(), "content must be stable");
+    }
+
+    /// IMPORTANT 4: the force path is the one that could grow the file on
+    /// every run (each run replaces the span with a fresh copy of `block`);
+    /// assert it converges rather than accumulating bytes.
+    #[test]
+    fn is_idempotent_across_three_forced_runs() {
+        let mut current: Option<String> = None;
+        let mut lengths = Vec::new();
+        for _ in 0..3 {
+            let (written, _) = apply(current.as_deref(), &block(), true);
+            current = written;
+            lengths.push(current.as_ref().unwrap().len());
+        }
+        assert_eq!(
+            lengths[1], lengths[2],
+            "forced re-apply must not grow the file run over run"
+        );
+        let stable = current.clone().unwrap();
+
+        let (written, outcome) = apply(current.as_deref(), &block(), true);
+        assert!(matches!(outcome, AppendOutcome::Replaced));
+        assert_eq!(
+            written.unwrap(),
+            stable,
+            "forced runs must converge to identical bytes"
+        );
+    }
+
+    /// MINOR 6: an empty existing file and an absent file are the same
+    /// logical state; they must produce byte-identical output.
+    #[test]
+    fn empty_existing_file_matches_absent_file() {
+        let (from_absent, absent_outcome) = apply(None, &block(), false);
+        let (from_empty, empty_outcome) = apply(Some(""), &block(), false);
+        assert_eq!(from_absent, from_empty);
+        assert_eq!(absent_outcome, empty_outcome);
     }
 
     #[test]
