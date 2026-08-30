@@ -115,4 +115,18 @@ libc = "musl"
         assert_eq!(Os::Win32.as_npm(), "win32");
         assert_eq!(Cpu::Arm64.as_npm(), "arm64");
     }
+
+    #[test]
+    fn libc_as_npm_spells_glibc_and_musl() {
+        assert_eq!(Libc::Glibc.as_npm(), "glibc");
+        assert_eq!(Libc::Musl.as_npm(), "musl");
+    }
+
+    #[test]
+    fn libc_short_form_feeds_generated_platform_names() {
+        // `short()` feeds names like `linux-x64-gnu`: glibc is spelled
+        // "gnu" (not "glibc"), musl keeps its own name.
+        assert_eq!(Libc::Glibc.short(), "gnu");
+        assert_eq!(Libc::Musl.short(), "musl");
+    }
 }
