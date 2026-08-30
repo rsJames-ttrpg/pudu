@@ -2,13 +2,14 @@ use std::path::Path;
 
 use assert_cmd::Command;
 
-#[allow(dead_code)]
 pub fn pudu(dir: &Path) -> Command {
     let mut c = Command::cargo_bin("pudu").expect("binary builds");
     c.current_dir(dir);
     c
 }
 
+// `tests/init.rs` only uses `pudu()` from this module, so in that crate
+// `GOOD_CONFIG` and `project` are otherwise unused.
 #[allow(dead_code)]
 pub const GOOD_CONFIG: &str = r#"
 lockfile_path   = "pnpm-lock.yaml"
@@ -25,6 +26,8 @@ cpu = "arm64"
 "#;
 
 /// A tempdir containing a lockfile and, optionally, a `pudu.toml`.
+///
+/// (Not used by `tests/init.rs` — see the note on `GOOD_CONFIG` above.)
 #[allow(dead_code)]
 pub fn project(config: Option<&str>) -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
