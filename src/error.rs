@@ -6,7 +6,8 @@
 //! * **Typed, per-module `thiserror` enums** ([`ConfigError`], [`DeriveError`])
 //!   for library-internal failures, so tests assert on variants rather than
 //!   message text (spec §6).
-//! * **Typed warning enums** ([`ConfigWarning`], [`DeriveWarning`]) alongside
+//! * **Typed warning enums** ([`ConfigWarning`], [`DeriveWarning`],
+//!   [`InitWarning`]) alongside
 //!   them, for the same reason — a warning is a diagnostic too, and
 //!   `Vec<String>` forced its tests to grep prose.
 //! * **[`anyhow`] at the CLI boundary**, with [`CliError`] carrying the cases
@@ -40,8 +41,9 @@ pub enum ExitCode {
     Internal = 1,
     /// Usage error. Also clap's own code for a bad command line.
     Usage = 2,
-    /// Configuration invalid: validation failed, or `pudu.toml` is malformed.
-    ConfigInvalid = 3,
+    /// Input invalid: `pudu.toml` failed validation, or a file pudu reads
+    /// (`pudu.toml`, `pnpm-lock.yaml`, a fixup file) is missing or malformed.
+    InputInvalid = 3,
     /// The verb is registered but not implemented yet.
     Unimplemented = 4,
 }
@@ -95,6 +97,17 @@ pub enum CliError {
     #[error("{count} error(s) in pudu.toml")]
     #[diagnostic(code(pudu::config::invalid))]
     ConfigInvalid { count: usize },
+
+    #[error("cannot change directory to {path}")]
+    #[diagnostic(
+        code(pudu::usage::bad_directory),
+        help("`-C` takes a path to an existing directory")
+    )]
+    BadDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl CliError {
@@ -109,11 +122,11 @@ impl CliError {
     pub fn exit_code(&self) -> ExitCode {
         match self {
             CliError::Unimplemented { .. } => ExitCode::Unimplemented,
-            CliError::ConfigExists { .. } | CliError::DebugNeedsSubcommand { .. } => {
-                ExitCode::Usage
-            }
+            CliError::ConfigExists { .. }
+            | CliError::DebugNeedsSubcommand { .. }
+            | CliError::BadDirectory { .. } => ExitCode::Usage,
             CliError::ConfigUnreadable { .. } | CliError::ConfigInvalid { .. } => {
-                ExitCode::ConfigInvalid
+                ExitCode::InputInvalid
             }
         }
     }
@@ -296,6 +309,70 @@ pub enum DeriveError {
     },
 }
 
+/// Non-fatal findings from `pudu init`'s **scaffolding** pass.
+///
+/// Separate from [`DeriveWarning`] rather than merged into it: `DeriveWarning`
+/// is part of the contract of the pure `derive_platforms` function — it is
+/// returned in `DerivedPlatforms::warnings` and carried as `#[related]` on
+/// [`DeriveError::NoUsablePlatforms`], where a "third-party/js/BUCK exists"
+/// finding would be nonsense. The variant sets are genuinely disjoint (spec
+/// §6), so they are two enums.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
+pub enum InitWarning {
+    #[error(
+        "initializing in {init_root}, but pnpm-lock.yaml is in {lockfile_dir}; \
+         assuming the Buck cell root is the latter for the `root//` load label in toolchains/BUCK"
+    )]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::init::cell_root_guess),
+        help("edit the load label in toolchains/BUCK if your cell root differs")
+    )]
+    CellRootGuess {
+        init_root: PathBuf,
+        lockfile_dir: PathBuf,
+    },
+
+    #[error("{path} exists; leaving it alone")]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::init::third_party_file_exists),
+        help("files under third-party/js are yours once they exist; --force does not touch them")
+    )]
+    ThirdPartyFileExists { path: PathBuf },
+
+    #[error("{path} already declares a node toolchain (`:{name}`); leaving it alone")]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::init::existing_toolchain),
+        help("recorded as `[buck] node_toolchain = \"{recorded}\"` in pudu.toml")
+    )]
+    ExistingToolchain {
+        path: PathBuf,
+        name: String,
+        recorded: String,
+    },
+
+    #[error(
+        "could not read the target name out of the `system_node_toolchain(...)` call in {path}; \
+         assumed `{name}`"
+    )]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::init::toolchain_name_unparsed),
+        help("check `[buck] node_toolchain` in pudu.toml")
+    )]
+    ToolchainNameUnparsed { path: PathBuf, name: String },
+
+    #[error("{path} has unbalanced pudu markers; not modifying it")]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::init::unbalanced_markers),
+        help("add the block printed below by hand, then re-run `pudu config check`")
+    )]
+    UnbalancedMarkers { path: PathBuf },
+}
+
 // --- Rendering ------------------------------------------------------------
 
 /// An error's own message plus its cause chain, joined with `: `.
@@ -362,31 +439,50 @@ pub fn render_cli(err: &anyhow::Error) -> String {
     }
 }
 
-/// The exit code an `anyhow` error from the CLI boundary maps to.
+/// The typed-error registry: **the one place a new typed error is added.**
 ///
-/// Anything unclassified is [`ExitCode::Internal`]: an unexpected I/O failure
-/// is not a configuration problem, and must not be reported as one.
+/// Each arm names a type and how to get its [`ExitCode`]. The macro derives
+/// both halves of classification — the `&dyn Diagnostic` used for rendering
+/// and the exit code — from that single list, so a half-registration (which
+/// used to mean either "renders without `code`/`help`" or "silently exits 1")
+/// is not expressible. Adding `LockfileError` in S1 is one line here.
+macro_rules! typed_errors {
+    ($($ty:ty => $code:expr),+ $(,)?) => {
+        /// Recover the typed diagnostic behind an `anyhow::Error` from the
+        /// CLI boundary, together with the exit code it maps to.
+        ///
+        /// `None` means unclassified, which is [`ExitCode::Internal`]: an
+        /// unexpected I/O failure is not a configuration problem and must not
+        /// be reported as one.
+        pub fn classify(err: &anyhow::Error) -> Option<(&dyn Diagnostic, ExitCode)> {
+            $(
+                if let Some(e) = err.downcast_ref::<$ty>() {
+                    let code: fn(&$ty) -> ExitCode = $code;
+                    return Some((e as &dyn Diagnostic, code(e)));
+                }
+            )+
+            None
+        }
+
+        /// Every registered type, by name — so a test can assert its sample
+        /// set covers the registry.
+        pub const REGISTERED_ERRORS: &[&str] = &[$(stringify!($ty)),+];
+    };
+}
+
+typed_errors! {
+    CliError => CliError::exit_code,
+    ConfigError => |_| ExitCode::InputInvalid,
+    DeriveError => |_| ExitCode::InputInvalid,
+}
+
+/// The exit code an `anyhow` error from the CLI boundary maps to.
 pub fn exit_code(err: &anyhow::Error) -> ExitCode {
-    if let Some(e) = err.downcast_ref::<CliError>() {
-        return e.exit_code();
-    }
-    if err.downcast_ref::<ConfigError>().is_some() || err.downcast_ref::<DeriveError>().is_some() {
-        return ExitCode::ConfigInvalid;
-    }
-    ExitCode::Internal
+    classify(err).map_or(ExitCode::Internal, |(_, code)| code)
 }
 
 fn as_diagnostic(err: &anyhow::Error) -> Option<&dyn Diagnostic> {
-    if let Some(e) = err.downcast_ref::<CliError>() {
-        return Some(e);
-    }
-    if let Some(e) = err.downcast_ref::<ConfigError>() {
-        return Some(e);
-    }
-    if let Some(e) = err.downcast_ref::<DeriveError>() {
-        return Some(e);
-    }
-    None
+    classify(err).map(|(d, _)| d)
 }
 
 #[cfg(test)]
@@ -500,7 +596,7 @@ mod tests {
 
     #[test]
     fn exit_codes_are_classified() {
-        let cases: [(anyhow::Error, ExitCode); 4] = [
+        let cases: [(anyhow::Error, ExitCode); 5] = [
             (
                 CliError::Unimplemented {
                     verb: "vendor".into(),
@@ -516,11 +612,86 @@ mod tests {
                 .into(),
                 ExitCode::Usage,
             ),
-            (ConfigError::NoPlatforms.into(), ExitCode::ConfigInvalid),
+            (
+                CliError::BadDirectory {
+                    path: "/no/such/dir".into(),
+                    source: std::io::Error::from(std::io::ErrorKind::NotFound),
+                }
+                .into(),
+                ExitCode::Usage,
+            ),
+            (ConfigError::NoPlatforms.into(), ExitCode::InputInvalid),
             (anyhow::anyhow!("disk on fire"), ExitCode::Internal),
         ];
         for (err, want) in cases {
             assert_eq!(exit_code(&err), want, "{err:#}");
         }
+    }
+
+    /// One sample per registered type. Bound to [`REGISTERED_ERRORS`] by the
+    /// test below, so adding a type to the `typed_errors!` registry without a
+    /// sample here fails the build's tests.
+    fn samples() -> Vec<(&'static str, anyhow::Error, ExitCode)> {
+        vec![
+            (
+                "CliError",
+                CliError::Unimplemented {
+                    verb: "vendor".into(),
+                    stage: "S3".into(),
+                }
+                .into(),
+                ExitCode::Unimplemented,
+            ),
+            (
+                "ConfigError",
+                ConfigError::NoPlatforms.into(),
+                ExitCode::InputInvalid,
+            ),
+            (
+                "DeriveError",
+                DeriveError::NoUsablePlatforms {
+                    axis: "os",
+                    warnings: vec![],
+                }
+                .into(),
+                ExitCode::InputInvalid,
+            ),
+        ]
+    }
+
+    /// Q2/1: registration used to be two hand-maintained downcast chains, and
+    /// registering in only one of them silently produced either a diagnostic
+    /// with no `code`/`help` or an exit of 1. `classify` returns both halves
+    /// from one registry; this pins that both halves are real for every
+    /// registered type.
+    #[test]
+    fn every_registered_error_classifies_with_a_code_and_an_exit_code() {
+        for (name, err, want) in samples() {
+            let (diag, code) = classify(&err)
+                .unwrap_or_else(|| panic!("{name} is registered but does not classify"));
+            assert_eq!(code, want, "{name} exit code");
+            assert_ne!(
+                code,
+                ExitCode::Internal,
+                "{name} must not fall through to the unclassified code"
+            );
+            assert!(
+                diag.code().is_some(),
+                "{name} must render with a diagnostic code"
+            );
+            assert!(
+                render(diag).contains(&diag.code().unwrap().to_string()),
+                "{name}'s code must reach the rendered output"
+            );
+        }
+    }
+
+    #[test]
+    fn the_samples_cover_the_whole_registry() {
+        let covered: Vec<&str> = samples().into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(
+            covered, REGISTERED_ERRORS,
+            "every type in the `typed_errors!` registry needs a sample above"
+        );
     }
 }

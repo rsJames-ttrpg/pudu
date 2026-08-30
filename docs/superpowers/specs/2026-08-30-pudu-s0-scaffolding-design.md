@@ -292,12 +292,20 @@ check` both call, so every diagnostic pudu prints has the same shape. Line
 wrapping is disabled: messages name absolute paths and Buck labels, and a path
 broken across lines is neither greppable nor copy-pasteable.
 
-**Warnings are typed too.** `ConfigWarning` (from `Config::validate`) and
-`DeriveWarning` (from `pudu init`'s `supportedArchitectures` expansion) are
+**Warnings are typed too.** `ConfigWarning` (from `Config::validate`),
+`DeriveWarning` (from `pudu init`'s `supportedArchitectures` expansion) and
+`InitWarning` (from `pudu init`'s scaffolding pass — cell-root guess, an
+existing third-party file, an existing or unparseable node toolchain) are
 `thiserror` + `miette` enums carrying `severity(Warning)`, not `Vec<String>`.
 They live in `src/error.rs` beside the error enums, one enum per producing
 module: the variant sets are disjoint, and warning tests assert on variants
-rather than on prose, which is the whole point of typing them.
+rather than on prose, which is the whole point of typing them. `DeriveWarning`
+and `InitWarning` stay separate for the same reason — `DeriveWarning` is part
+of the contract of the pure `derive_platforms` function, returned in
+`DerivedPlatforms::warnings` and carried as `#[related]` on
+`DeriveError::NoUsablePlatforms`, where a "file already exists" finding would
+be nonsense. **No diagnostic is printed with a raw `eprintln!`**: every one
+goes through `error::render`.
 
 Where an error needs the warnings that led to it — `DeriveError::NoUsablePlatforms`
 must tell a user *why* every candidate platform was dropped — they are carried
@@ -313,14 +321,31 @@ of the CLI contract, not an implementation detail:
 |---|---|
 | `0` | Success |
 | `1` | Internal or unexpected error — I/O failure, anything unclassified |
-| `2` | Usage error. clap's own code for a bad command line; pudu's own usage refusals (`pudu.toml` already exists, `pudu debug` with no subcommand) match it |
-| `3` | Configuration invalid — validation failed, or `pudu.toml` is missing or malformed |
+| `2` | Usage error. clap's own code for a bad command line; pudu's own usage refusals (`pudu.toml` already exists, `pudu debug` with no subcommand, `-C` naming a directory that is not there) match it |
+| `3` | Input invalid — validation failed, or a file pudu reads is missing or malformed |
 | `4` | Verb registered but not implemented yet |
 
-`ExitCode` lives in `src/error.rs`; `error::exit_code` maps an `anyhow::Error`
-from the CLI boundary onto it by downcasting to the typed errors. **Anything
-unclassified is `1`**: an unexpected I/O failure is not a configuration
-problem and must not be reported as one.
+**A malformed *input* file exits `3`, the same as a malformed `pudu.toml`** —
+`pnpm-lock.yaml` from S1 on, and fixup TOML from S7. Code `3` means "pudu's
+inputs are wrong; fix the files and re-run", not "`pudu.toml` specifically":
+a CI script's response is identical either way, and the diagnostic `code`
+(`pudu::lock::parse` against `pudu::config::parse`) is the stable, grep-able
+identifier for anything that does need to tell them apart. `1` stays reserved
+for pudu itself failing.
+
+`ExitCode` lives in `src/error.rs`; `error::classify` maps an `anyhow::Error`
+from the CLI boundary onto both its diagnostic and its exit code by
+downcasting to the typed errors. **Anything unclassified is `1`**: an
+unexpected I/O failure is not a configuration problem and must not be reported
+as one.
+
+`classify` is generated from a single `typed_errors!` registry listing each
+typed error and its exit code, so adding one (S1's `LockfileError`) is one
+edit in one place. The two hand-maintained downcast chains it replaced could
+be half-updated: registering only in the renderer silently exited `1`, and
+registering only in the exit-code mapper rendered with no `code`/`help`.
+A unit test asserts every registered type classifies to a non-`Internal` code
+*and* a diagnostic carrying a `code`.
 
 A subcommand that has already printed its own diagnostics returns a summary
 error purely to carry the exit code; `CliError::already_reported` tells `main`
