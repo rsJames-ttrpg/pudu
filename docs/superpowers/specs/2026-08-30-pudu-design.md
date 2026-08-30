@@ -42,7 +42,9 @@ Pudu is a **thin, offline reimplementation of pnpm's layout rules**, not a wrapp
 
 Implemented as a single Rust crate with `src/lib.rs` + `src/main.rs` split for internal modularity. No public library API commitment in v1.
 
-External crates pre-chosen and pinned in `Cargo.toml`: `clap`, `serde`, `serde_norway` (maintained `serde_yaml` fork; `serde_yaml` itself is unmaintained), `toml`/`toml_edit`, `nodejs-semver`, `reqwest`, `sha2`, `base64`, `flate2`, `tar`, `gix`, `insta`, `miette`, `anyhow`/`thiserror`.
+External crates pinned in `Cargo.toml` **today** (the S0 set): `anyhow`/`thiserror`, `clap`, `miette`, `pathdiff`, `serde`, `serde_json`, `serde_norway` (maintained `serde_yaml` fork; `serde_yaml` itself is unmaintained), `tempfile`, `toml`, `url` — plus dev-dependencies `assert_cmd` and `insta`.
+
+The rest of the toolkit is chosen but **deferred to the stage that needs it**, so a first-time contributor does not compile rustls and gix to run a TOML parser. The mapping (ledger row TD-S0-21 is the authority): `nodejs-semver` → S1/S2 version handling; `reqwest`, `sha2`, `base64`, `tar`, `flate2` → S3 tarball fetching, with `httpmock` for its tests; `toml_edit` → S4, format-preserving `pudu.toml` rewriting; `glob`/`walkdir` → S7 local fixup discovery; `gix` and `dirs` → S8b's git fixup registry and its cache.
 
 ---
 
