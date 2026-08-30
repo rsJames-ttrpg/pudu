@@ -96,7 +96,7 @@ impl Cli {
         }
 
         match self.command {
-            Commands::Init { .. } => Err(stub::unimplemented("init", "S0 Task 8")),
+            Commands::Init { force, path } => init::run(force, path),
             Commands::Config { command } => match command {
                 ConfigCommands::Check { format } => config_check::run(&format),
             },
