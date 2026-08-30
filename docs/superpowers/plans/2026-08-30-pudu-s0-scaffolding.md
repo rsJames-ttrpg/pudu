@@ -59,14 +59,12 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn missing_field_error_names_the_field_and_file() {
-        let e = ConfigError::MissingField {
-            path: PathBuf::from("/repo/pudu.toml"),
-            field: "lockfile_path",
+    fn lockfile_not_found_names_the_resolved_path() {
+        let e = ConfigError::LockfileNotFound {
+            path: PathBuf::from("/repo/pnpm-lock.yaml"),
         };
         let msg = e.to_string();
-        assert!(msg.contains("lockfile_path"), "message must name the field: {msg}");
-        assert!(msg.contains("/repo/pudu.toml"), "message must name the file: {msg}");
+        assert!(msg.contains("/repo/pnpm-lock.yaml"), "message must name the file: {msg}");
     }
 
     #[test]
@@ -120,10 +118,6 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
-
-    #[error("{path}: missing required field `{field}`")]
-    #[diagnostic(code(pudu::config::missing_field))]
-    MissingField { path: PathBuf, field: &'static str },
 
     #[error("platform `{platform}`: `libc` applies only to linux")]
     #[diagnostic(
@@ -191,9 +185,6 @@ pub enum ConfigError {
     )]
     NoPlatforms,
 
-    #[error("{path}: {message}")]
-    #[diagnostic(code(pudu::config::io))]
-    Io { path: PathBuf, message: String },
 }
 
 impl ConfigError {

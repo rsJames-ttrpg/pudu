@@ -278,7 +278,7 @@ pub struct BuckConfig {
 
 CLI-level errors use `anyhow`; library-internal errors use `thiserror`-derived enums per module so tests can assert on variants rather than message text. `main` renders the final error through `miette` for line/column and source-span display.
 
-S0 implements `ConfigError` in `src/error.rs` with variants covering the §4 validation classes: `Parse(toml::de::Error)`, `MissingField`, `BadPlatform`, `LibcOnNonLinux`, `DuplicatePlatform`, `BadConstraintLabel`, `BadRegistryUrl`, `BadFixupRegistry`, `BadPackageName`, `LockfileNotFound`, `ThirdPartyDirNotWritable`.
+S0 implements `ConfigError` in `src/error.rs` with variants covering the §4 validation classes: `Parse`, `LibcOnNonLinux`, `WindowsUnsupported`, `DuplicatePlatform`, `BadConstraintLabel`, `BadRegistryScope`, `BadFixupRegistry`, `BadPackageName`, `BadToolchainLabel`, `LockfileNotFound`, `ThirdPartyDirNotWritable`, `NoPlatforms`. There is deliberately no `MissingField` variant: serde reports absent required fields itself, with better position information than we could reconstruct.
 
 **Contract, enforced by snapshot tests:** every error message names a field or a file by path, and carries line/column where the source position is known.
 
