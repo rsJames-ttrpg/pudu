@@ -42,7 +42,7 @@ pub fn run(format: &str) -> anyhow::Result<()> {
 
     if !errors.is_empty() {
         for e in &errors {
-            eprintln!("error: {e}");
+            eprintln!("error: {e:#}");
         }
         anyhow::bail!("{} error(s) in pudu.toml", errors.len());
     }

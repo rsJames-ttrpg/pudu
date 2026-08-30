@@ -66,11 +66,11 @@ pub enum Commands {
     /// Report unreferenced vendored tarballs. [UNIMPLEMENTED — Phase 2]
     Unused,
     /// Developer inspection commands.
-    ///
-    /// Has no subcommands at S0; S1 adds `print-graph` and S2 adds
-    /// `platforms`. Modelled as trailing args rather than an empty
-    /// `#[derive(Subcommand)]` enum, because deriving `Subcommand` on an
-    /// uninhabited enum does not compile.
+    // Has no subcommands at S0; S1 adds `print-graph` and S2 adds
+    // `platforms`. Modelled as trailing args rather than an empty
+    // `#[derive(Subcommand)]` enum, because deriving `Subcommand` on an
+    // uninhabited enum does not compile. Kept out of the `///` doc comment
+    // so clap does not ship this rationale to users in `--help`.
     Debug {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

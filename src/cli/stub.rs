@@ -7,6 +7,6 @@
 pub fn unimplemented(verb: &str, stage: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "pudu {verb} is not implemented yet (planned for {stage}); \
-         see docs/superpowers/specs/"
+         see https://github.com/rsJames-ttrpg/pudu"
     )
 }
