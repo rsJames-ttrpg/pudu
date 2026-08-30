@@ -1,6 +1,7 @@
 //! CLI surface and dispatch.
 
 pub mod config_check;
+pub mod init;
 pub mod stub;
 
 use std::path::PathBuf;
