@@ -670,6 +670,24 @@ registry_rev = "deadbeef"
     }
 
     #[test]
+    fn validate_does_not_create_third_party_dir() {
+        // `pudu config check` is specified as side-effect free: validating
+        // must not materialize `third_party_dir`. GOOD's third_party_dir is
+        // "third-party/js", two nonexistent levels below the tempdir, which
+        // exercises the multi-level ancestor walk in `check_writable`.
+        let d = tempdir_with_lockfile();
+        let tpd = d.path().join("third-party");
+        assert!(!tpd.exists());
+        let (errors, _) = cfg(GOOD).validate(d.path());
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            !tpd.exists(),
+            "validate() must not create third_party_dir or its ancestors"
+        );
+        assert!(!tpd.join("js").exists());
+    }
+
+    #[test]
     fn warns_on_single_platform_and_unpinned_registry() {
         let d = tempdir_with_lockfile();
         let c = cfg(
