@@ -248,7 +248,7 @@ S1 and S2 can be developed in parallel after S0; both feed S3.
 |---|---|---|---|
 | Design | [2026-08-30-pudu-design.md](./2026-08-30-pudu-design.md) | n/a | ✅ committed |
 | Roadmap | this document | n/a | ✅ committed |
-| S0 | (not yet written) | (not yet written) | ⬜ next |
+| S0 | [2026-08-30-pudu-s0-scaffolding-design.md](./2026-08-30-pudu-s0-scaffolding-design.md) | (not yet written) | 🟡 spec written |
 | S1–S9 | (not yet written) | (not yet written) | ⬜ planned |
 
 ---
