@@ -29,7 +29,7 @@ pudu --help                        # lists all phase-1 verbs
 pudu --version                     # crate version (build id deferred to S9)
 ```
 
-Registered but stubbed — each prints `error: pudu <verb> is not implemented yet (planned for S<n>); see docs/superpowers/specs/` and exits 2:
+Registered but stubbed — each reports `pudu <verb> is not implemented yet (planned for S<n>)` and exits 4 (§6.1):
 
 ```
 pudu vendor        # UNIMPLEMENTED (S3)
@@ -285,7 +285,46 @@ S0 implements `ConfigError` in `src/error.rs` with variants covering the §4 val
 
 **Contract, enforced by snapshot tests:** every error message names a field or a file by path, and carries line/column where the source position is known.
 
-`miette` integration stays minimal at S0 — message plus position. Rich source-span rendering is deferred to S7, where the fixup `cfg()` parser needs it far more.
+`miette` integration stays minimal at S0 — message, `code`, `help`, and position. Rich source-span rendering (pointing into `pudu.toml` itself) is deferred to S7, where the fixup `cfg()` parser needs it far more.
+
+Rendering is centralized in `error::render`, which `main` and `pudu config
+check` both call, so every diagnostic pudu prints has the same shape. Line
+wrapping is disabled: messages name absolute paths and Buck labels, and a path
+broken across lines is neither greppable nor copy-pasteable.
+
+**Warnings are typed too.** `ConfigWarning` (from `Config::validate`) and
+`DeriveWarning` (from `pudu init`'s `supportedArchitectures` expansion) are
+`thiserror` + `miette` enums carrying `severity(Warning)`, not `Vec<String>`.
+They live in `src/error.rs` beside the error enums, one enum per producing
+module: the variant sets are disjoint, and warning tests assert on variants
+rather than on prose, which is the whole point of typing them.
+
+Where an error needs the warnings that led to it — `DeriveError::NoUsablePlatforms`
+must tell a user *why* every candidate platform was dropped — they are carried
+as a `#[related]` field and rendered by miette, not concatenated into the
+message string.
+
+### 6.1 Exit codes
+
+CI scripts branch on these (`--check` semantics land in S3), so they are part
+of the CLI contract, not an implementation detail:
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Internal or unexpected error — I/O failure, anything unclassified |
+| `2` | Usage error. clap's own code for a bad command line; pudu's own usage refusals (`pudu.toml` already exists, `pudu debug` with no subcommand) match it |
+| `3` | Configuration invalid — validation failed, or `pudu.toml` is missing or malformed |
+| `4` | Verb registered but not implemented yet |
+
+`ExitCode` lives in `src/error.rs`; `error::exit_code` maps an `anyhow::Error`
+from the CLI boundary onto it by downcasting to the typed errors. **Anything
+unclassified is `1`**: an unexpected I/O failure is not a configuration
+problem and must not be reported as one.
+
+The codes are deliberately not printed in `--help`. The help output is already
+the densest surface in the tool, and a table of exit codes there would push the
+verb list further from the top for a fact that belongs in this spec.
 
 ---
 
@@ -347,7 +386,7 @@ The existing three-runner workflow covers S0 unchanged. No new jobs.
 5. The toolchain append satisfies every row of §3.3; three consecutive runs leave `toolchains/BUCK` byte-identical; a pre-existing node toolchain is left untouched and recorded in `pudu.toml`.
 6. `pudu --help` lists all phase-1 verbs with unimplemented ones marked; `pudu --version` prints the crate version. (A build identifier needs a `build.rs`; deferred to S9 with the rest of the version-string polish.)
 7. `pudu config check` accepts a good config and rejects each of the ten §4 classes with an error naming the field or file.
-8. `pudu debug` with no subcommand errors and exits 2; every stubbed verb reports its planned stage and exits 2.
+8. `pudu debug` with no subcommand errors and exits 2 (usage); every stubbed verb reports its planned stage and exits 4 (§6.1).
 9. CI green on all three runners: build, test, clippy `-D warnings`, fmt `--check`.
 10. Snapshot tests pass, and running them twice produces no diff.
 
