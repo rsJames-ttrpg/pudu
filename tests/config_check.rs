@@ -49,6 +49,43 @@ fn json_format_is_machine_readable() {
 }
 
 #[test]
+fn json_format_reports_errors_on_stdout_and_exits_nonzero() {
+    let d = project(Some(
+        "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"win32\"\ncpu=\"x64\"\nlibc=\"glibc\"\n",
+    ));
+    let out = pudu(d.path())
+        .args(["config", "check", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("\"ok\""), "{stdout}");
+    assert!(stdout.contains("false"), "{stdout}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(value["ok"], false, "{value}");
+    let errors = value["errors"].as_array().expect("errors array");
+    assert!(!errors.is_empty(), "{value}");
+}
+
+#[test]
+fn warnings_go_to_stderr_not_stdout() {
+    let single_platform = "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"linux\"\ncpu=\"x64\"\nlibc=\"glibc\"\n";
+    let d = project(Some(single_platform));
+    let out = pudu(d.path()).args(["config", "check"]).output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("only one platform is configured"),
+        "{stderr}"
+    );
+    assert!(
+        !stdout.contains("only one platform is configured"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn missing_config_file_names_the_path() {
     let d = project(None);
     let out = pudu(d.path()).args(["config", "check"]).output().unwrap();
