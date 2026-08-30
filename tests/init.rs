@@ -258,3 +258,146 @@ fn non_force_run_leaves_a_stale_managed_block_alone() {
         "a non-force run must not refresh a stale managed block"
     );
 }
+
+/// I1: an existing user toolchain must be RECORDED in pudu.toml, under the
+/// name the file actually declares — not the hardcoded `:node` (exit
+/// criterion 5). A wrong label here becomes a reference to a nonexistent
+/// Buck target at S4.
+#[test]
+fn records_an_existing_user_toolchain_under_its_real_name() {
+    let d = workspace(true);
+    fs::create_dir_all(d.path().join("toolchains")).unwrap();
+    fs::write(
+        d.path().join("toolchains/BUCK"),
+        "system_node_toolchain(name = \"my_node\", node = \"/opt/node/bin/node\")\n",
+    )
+    .unwrap();
+
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let cfg = fs::read_to_string(d.path().join("pudu.toml")).unwrap();
+    assert!(
+        cfg.contains("node_toolchain = \"toolchains//:my_node\""),
+        "the existing toolchain must be recorded: {cfg}"
+    );
+    assert!(
+        !cfg.contains("toolchains//:node\""),
+        "must not record the default label: {cfg}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("my_node"), "{stderr}");
+
+    // And the generated config must still validate.
+    let check = pudu(d.path()).args(["config", "check"]).output().unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+/// I1: when the target name cannot be parsed out of the call, fall back to
+/// `node` and say so, rather than silently recording a guess.
+#[test]
+fn unparseable_toolchain_name_falls_back_and_says_so() {
+    let d = workspace(true);
+    fs::create_dir_all(d.path().join("toolchains")).unwrap();
+    fs::write(
+        d.path().join("toolchains/BUCK"),
+        "system_node_toolchain(**MY_KWARGS)\n",
+    )
+    .unwrap();
+
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(out.status.success());
+    let cfg = fs::read_to_string(d.path().join("pudu.toml")).unwrap();
+    assert!(
+        cfg.contains("node_toolchain = \"toolchains//:node\""),
+        "{cfg}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("could not read the target name"),
+        "the fallback must be announced: {stderr}"
+    );
+}
+
+/// I8: the `root//` load label is anchored at the Buck cell root, not at
+/// init's own directory. Running below the lockfile directory must prefix
+/// the label with the path from that directory, and warn that the cell root
+/// is being guessed.
+#[test]
+fn load_label_is_relative_to_the_lockfile_directory() {
+    let d = tempfile::tempdir().unwrap();
+    fs::write(d.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+    let nested = d.path().join("apps/web");
+    fs::create_dir_all(&nested).unwrap();
+
+    let out = pudu(&nested).arg("init").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let buck = fs::read_to_string(nested.join("toolchains/BUCK")).unwrap();
+    assert!(
+        buck.contains("load(\"root//apps/web/third-party/js:toolchains.bzl\""),
+        "the load label must resolve to the real directory: {buck}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("cell root"),
+        "an ambiguous cell root must be warned about: {stderr}"
+    );
+}
+
+/// I8: at the lockfile directory itself there is no prefix and no warning.
+#[test]
+fn load_label_has_no_prefix_at_the_lockfile_directory() {
+    let d = workspace(true);
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(out.status.success());
+    let buck = fs::read_to_string(d.path().join("toolchains/BUCK")).unwrap();
+    assert!(
+        buck.contains("load(\"root//third-party/js:toolchains.bzl\""),
+        "{buck}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(!stderr.contains("cell root"), "{stderr}");
+}
+
+/// M4: "wrote third-party/js" must not be printed when every file in it was
+/// skipped as already present.
+#[test]
+fn does_not_claim_to_write_third_party_js_when_everything_was_skipped() {
+    let d = workspace(true);
+    pudu(d.path()).arg("init").output().unwrap();
+
+    let out = pudu(d.path()).args(["init", "--force"]).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !stdout.contains("third-party/js"),
+        "nothing under third-party/js was written: {stdout}"
+    );
+}
+
+/// M6: `pudu init <nonexistent-dir>` must not fail with a bare
+/// "No such file or directory" naming pudu.toml.
+#[test]
+fn init_creates_a_missing_target_directory() {
+    let d = workspace(true);
+    let out = pudu(d.path()).args(["init", "newdir"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(d.path().join("newdir/pudu.toml").is_file());
+}

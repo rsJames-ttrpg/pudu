@@ -68,16 +68,16 @@ pub struct BuckConfig {
 
 // --- Raw (on-disk) shapes -------------------------------------------------
 
-fn default_third_party_dir() -> PathBuf {
+pub(crate) fn default_third_party_dir() -> PathBuf {
     PathBuf::from("third-party/js")
 }
-fn default_registry_url() -> Url {
+pub(crate) fn default_registry_url() -> Url {
     Url::parse("https://registry.npmjs.org").expect("valid literal URL")
 }
-fn default_file_name() -> String {
+pub(crate) fn default_file_name() -> String {
     "BUCK".to_string()
 }
-fn default_node_toolchain() -> String {
+pub(crate) fn default_node_toolchain() -> String {
     "toolchains//:node".to_string()
 }
 fn default_true() -> bool {

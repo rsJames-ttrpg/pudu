@@ -34,31 +34,87 @@ pub enum AppendOutcome {
     /// `--force` replaced the contents of an existing managed block.
     Replaced,
     /// A node toolchain the user owns was found; pudu did not write.
-    ExistingToolchain(String),
+    /// `parsed` is false when the target name could not be read out of the
+    /// call and the fallback `"node"` is being reported instead.
+    ExistingToolchain { name: String, parsed: bool },
     /// Markers are unbalanced; pudu refuses to guess.
     Unparseable,
 }
 
 /// Does the file already declare a node toolchain outside pudu's block?
 ///
+/// Returns the target name from the call's `name = "..."` argument, and
+/// whether that name was actually parsed out (`false` means the fallback
+/// `"node"` is being reported, and the caller should say so).
+///
 /// Deliberately conservative and textual: a false positive costs one printed
 /// line of manual instruction, while a false negative produces a duplicate
 /// target and a confusing Buck error.
-fn existing_node_toolchain(text: &str) -> Option<String> {
+fn existing_node_toolchain(text: &str) -> Option<(String, bool)> {
     const NAME: &str = "system_node_toolchain";
-    for line in text.lines() {
-        let l = line.trim();
-        if l.starts_with('#') {
+    for (offset, line) in line_offsets(text) {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
             continue;
         }
         // Look for the call anywhere on the line (e.g. `x =
         // system_node_toolchain(...)`), tolerating whitespace before the
         // opening paren (e.g. `system_node_toolchain (...)`).
-        if let Some(idx) = l.find(NAME)
-            && l[idx + NAME.len()..].trim_start().starts_with('(')
-        {
-            return Some("node".to_string());
+        let Some(idx) = line.find(NAME) else {
+            continue;
+        };
+        let after = &line[idx + NAME.len()..];
+        if !after.trim_start().starts_with('(') {
+            continue;
         }
+        // Arguments may wrap over several lines, so scan the rest of the
+        // file from the opening paren rather than just the rest of the line.
+        let paren = offset + idx + NAME.len() + (after.len() - after.trim_start().len());
+        let rest = &text[paren + 1..];
+        let args = match rest.find(')') {
+            Some(close) => &rest[..close],
+            None => rest,
+        };
+        return Some(match parse_name_argument(args) {
+            Some(name) => (name, true),
+            None => ("node".to_string(), false),
+        });
+    }
+    None
+}
+
+/// Line contents paired with their byte offset in `text`.
+fn line_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut offset = 0;
+    text.split_inclusive('\n').map(move |raw| {
+        let start = offset;
+        offset += raw.len();
+        (start, raw.trim_end_matches(['\n', '\r']))
+    })
+}
+
+/// Pull `"..."` out of a `name = "..."` keyword argument.
+fn parse_name_argument(args: &str) -> Option<String> {
+    let mut rest = args;
+    while let Some(idx) = rest.find("name") {
+        let before_is_boundary = rest[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        let after = rest[idx + "name".len()..].trim_start();
+        if before_is_boundary && let Some(value) = after.strip_prefix('=') {
+            let value = value.trim_start();
+            for quote in ['"', '\''] {
+                if let Some(v) = value.strip_prefix(quote)
+                    && let Some(end) = v.find(quote)
+                    && !v[..end].is_empty()
+                {
+                    return Some(v[..end].to_string());
+                }
+            }
+            return None;
+        }
+        rest = &rest[idx + "name".len()..];
     }
     None
 }
@@ -85,7 +141,10 @@ pub fn apply(existing: Option<&str>, block: &str, force: bool) -> (Option<String
             if !force {
                 return (None, AppendOutcome::AlreadyManaged);
             }
-            // Replace exactly the marked span, including END's trailing newline.
+            // Replace exactly the marked span, including END's trailing
+            // newline. Using the FIRST occurrence's offsets is only sound
+            // because the `(1, 1, ..)` gate above proves each marker occurs
+            // exactly once, so first == only.
             let mut tail = e + END.len();
             if text[tail..].starts_with('\n') {
                 tail += 1;
@@ -97,8 +156,8 @@ pub fn apply(existing: Option<&str>, block: &str, force: bool) -> (Option<String
             (Some(out), AppendOutcome::Replaced)
         }
         (0, 0, None, None) => {
-            if let Some(name) = existing_node_toolchain(text) {
-                return (None, AppendOutcome::ExistingToolchain(name));
+            if let Some((name, parsed)) = existing_node_toolchain(text) {
+                return (None, AppendOutcome::ExistingToolchain { name, parsed });
             }
             let mut out = text.to_string();
             if !out.is_empty() && !out.ends_with('\n') {
@@ -162,7 +221,7 @@ mod tests {
         let (written, outcome) = apply(Some(existing), &block(), false);
         assert!(written.is_none(), "must not rewrite a user's own toolchain");
         match outcome {
-            AppendOutcome::ExistingToolchain(t) => assert_eq!(t, "node"),
+            AppendOutcome::ExistingToolchain { name, .. } => assert_eq!(name, "node"),
             other => panic!("expected ExistingToolchain, got {other:?}"),
         }
     }
@@ -179,7 +238,7 @@ mod tests {
             let (written, outcome) = apply(Some(existing), &block(), false);
             assert!(written.is_none(), "must not write over {existing:?}");
             assert!(
-                matches!(outcome, AppendOutcome::ExistingToolchain(_)),
+                matches!(outcome, AppendOutcome::ExistingToolchain { .. }),
                 "expected ExistingToolchain for {existing:?}, got {outcome:?}"
             );
         }
@@ -336,6 +395,61 @@ mod tests {
         let (from_empty, empty_outcome) = apply(Some(""), &block(), false);
         assert_eq!(from_absent, from_empty);
         assert_eq!(absent_outcome, empty_outcome);
+    }
+
+    /// I1: the reported target name must be the one actually declared in
+    /// the file — `pudu.toml`'s `node_toolchain` label is derived from it,
+    /// so a hardcoded "node" would point at a target that does not exist.
+    #[test]
+    fn reports_the_parsed_target_name() {
+        for (text, want) in [
+            ("system_node_toolchain(name = \"my_node\")\n", "my_node"),
+            (
+                "system_node_toolchain (name=\"tight\", visibility = [])\n",
+                "tight",
+            ),
+            (
+                "x = system_node_toolchain(\n    name = \"multi\",\n)\n",
+                "multi",
+            ),
+            (
+                "system_node_toolchain(\n    node = \"/opt/node\",\n    name = \"after\",\n)\n",
+                "after",
+            ),
+        ] {
+            let (written, outcome) = apply(Some(text), &block(), false);
+            assert!(written.is_none(), "must not write: {text}");
+            assert_eq!(
+                outcome,
+                AppendOutcome::ExistingToolchain {
+                    name: want.to_string(),
+                    parsed: true,
+                },
+                "for {text}"
+            );
+        }
+    }
+
+    /// I1: when the name cannot be read out of the call, fall back to
+    /// "node" but record that it was a fallback so the caller can say so.
+    #[test]
+    fn unparseable_target_name_falls_back_to_node() {
+        for text in [
+            "system_node_toolchain(name = NAME)\n",
+            "system_node_toolchain(**kwargs)\n",
+            "system_node_toolchain(name = \"\")\n",
+        ] {
+            let (written, outcome) = apply(Some(text), &block(), false);
+            assert!(written.is_none());
+            assert_eq!(
+                outcome,
+                AppendOutcome::ExistingToolchain {
+                    name: "node".to_string(),
+                    parsed: false,
+                },
+                "for {text}"
+            );
+        }
     }
 
     #[test]
