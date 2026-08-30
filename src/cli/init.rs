@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::cli::toolchain::{self, AppendOutcome};
 use crate::config::Platform;
-use crate::error::{DeriveError, DeriveWarning};
+use crate::error::{DeriveError, DeriveWarning, InitWarning, render};
 use crate::platform::{Cpu, Libc, Os};
 
 /// What an upward walk from the invocation directory found.
@@ -392,7 +392,7 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
     // Through the shared renderer, so a `DeriveWarning` looks the same here
     // as it does when it rides along on `DeriveError::NoUsablePlatforms`.
     for w in &derived.warnings {
-        eprint!("{}", crate::error::render(w));
+        eprint!("{}", render(w));
     }
 
     let third_party_dir = crate::config::default_third_party_dir();
@@ -409,12 +409,12 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
             if rel.as_os_str().is_empty() || rel.starts_with("..") {
                 None
             } else {
-                eprintln!(
-                    "warning: initializing in {}, but pnpm-lock.yaml is in {}; \
-                     assuming the Buck cell root is the latter for the `root//` load label \
-                     in toolchains/BUCK — edit it if your cell root differs",
-                    root.display(),
-                    dir.display()
+                eprint!(
+                    "{}",
+                    render(&InitWarning::CellRootGuess {
+                        init_root: root.clone(),
+                        lockfile_dir: dir.to_path_buf(),
+                    })
                 );
                 Some(slashed(&rel))
             }
@@ -481,7 +481,10 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
     ] {
         let p = tp.join(rel);
         if p.exists() {
-            eprintln!("warning: {} exists; leaving it alone", p.display());
+            eprint!(
+                "{}",
+                render(&InitWarning::ThirdPartyFileExists { path: p.clone() })
+            );
             continue;
         }
         std::fs::write(&p, contents).with_context(|| format!("cannot write {}", p.display()))?;
@@ -510,26 +513,36 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
             );
         }
         AppendOutcome::ExistingToolchain { name, parsed } => {
-            eprintln!(
-                "{} already declares a node toolchain (`:{name}`); leaving it alone.\n\
-                 Recorded it as `[buck] node_toolchain = \"{node_toolchain}\"` in pudu.toml.",
-                tc_path.display()
+            eprint!(
+                "{}",
+                render(&InitWarning::ExistingToolchain {
+                    path: tc_path.clone(),
+                    name: name.clone(),
+                    recorded: node_toolchain.clone(),
+                })
             );
             if !parsed {
-                eprintln!(
-                    "warning: could not read the target name out of that \
-                     `system_node_toolchain(...)` call; assumed `{name}`. \
-                     Check `[buck] node_toolchain` in pudu.toml."
+                eprint!(
+                    "{}",
+                    render(&InitWarning::ToolchainNameUnparsed {
+                        path: tc_path.clone(),
+                        name: name.clone(),
+                    })
                 );
             }
             next_steps =
                 "check `[buck] node_toolchain` in pudu.toml, then pudu vendor && pudu buckify";
         }
         AppendOutcome::Unparseable => {
-            eprintln!(
-                "{} has unbalanced pudu markers; not modifying it. Add this manually:\n\n{block}",
-                tc_path.display()
+            eprint!(
+                "{}",
+                render(&InitWarning::UnbalancedMarkers {
+                    path: tc_path.clone(),
+                })
             );
+            // The block itself is content to copy, not a diagnostic, so it is
+            // printed plainly under the rendered warning.
+            eprintln!("\n{block}");
             next_steps = "add the block above to toolchains/BUCK, then pudu vendor && pudu buckify";
         }
     }

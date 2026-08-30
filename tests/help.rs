@@ -67,3 +67,18 @@ fn an_unknown_flag_exits_two() {
     let out = pudu().arg("--nonsense").output().unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// M8: `-C <nonexistent>` is a usage refusal (spec §6.1 code 2), and prints
+/// with a `code` header like every other diagnostic — it used to be a bare
+/// `anyhow!` that exited 1 with no code.
+#[test]
+fn a_bad_change_directory_is_a_usage_error() {
+    let out = pudu()
+        .args(["-C", "no/such/dir", "config", "check"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("pudu::usage::bad_directory"), "{stderr}");
+    assert!(stderr.contains("no/such/dir"), "{stderr}");
+}
