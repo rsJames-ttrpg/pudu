@@ -3,6 +3,7 @@
 pub mod config_check;
 pub mod init;
 pub mod stub;
+pub mod toolchain;
 
 use std::path::PathBuf;
 
