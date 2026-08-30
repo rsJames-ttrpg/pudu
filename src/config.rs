@@ -223,6 +223,142 @@ impl Config {
             },
         })
     }
+
+    /// Validate the config. Relative paths resolve against `base_dir`, the
+    /// directory containing `pudu.toml`.
+    ///
+    /// Collects every problem rather than short-circuiting, so `pudu config
+    /// check` can report them all in one pass.
+    pub fn validate(&self, base_dir: &Path) -> (Vec<ConfigError>, Vec<String>) {
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+
+        let lockfile = base_dir.join(&self.lockfile_path);
+        if !lockfile.is_file() {
+            errors.push(ConfigError::LockfileNotFound { path: lockfile });
+        }
+
+        let tpd = base_dir.join(&self.third_party_dir);
+        if let Err(source) = check_writable(&tpd) {
+            errors.push(ConfigError::ThirdPartyDirNotWritable { path: tpd, source });
+        }
+
+        if self.platforms.is_empty() {
+            errors.push(ConfigError::NoPlatforms);
+        } else if self.platforms.len() == 1 {
+            warnings.push(
+                "only one platform is configured; generated rules will not vary by platform"
+                    .to_string(),
+            );
+        }
+
+        let mut seen: BTreeMap<(Os, Cpu, Option<Libc>), &str> = BTreeMap::new();
+        for (name, p) in &self.platforms {
+            if p.os == Os::Win32 {
+                errors.push(ConfigError::WindowsUnsupported {
+                    platform: name.clone(),
+                });
+            }
+            if p.libc.is_some() && p.os != Os::Linux {
+                errors.push(ConfigError::LibcOnNonLinux {
+                    platform: name.clone(),
+                });
+            }
+            for label in p.constraints.iter().flatten() {
+                if !is_buck_label(label) {
+                    errors.push(ConfigError::BadConstraintLabel {
+                        platform: name.clone(),
+                        label: label.clone(),
+                    });
+                }
+            }
+            let key = (p.os, p.cpu, p.libc);
+            if let Some(first) = seen.get(&key) {
+                errors.push(ConfigError::DuplicatePlatform {
+                    first: (*first).to_string(),
+                    second: name.clone(),
+                });
+            } else {
+                seen.insert(key, name);
+            }
+        }
+
+        for scope in self.registry.scopes.keys() {
+            if !scope.starts_with('@') {
+                errors.push(ConfigError::BadRegistryScope {
+                    scope: scope.clone(),
+                });
+            }
+        }
+
+        for name in &self.scripts.allow {
+            if !is_npm_package_name(name) {
+                errors.push(ConfigError::BadPackageName { name: name.clone() });
+            }
+        }
+
+        if !is_buck_label(&self.buck.node_toolchain) {
+            errors.push(ConfigError::BadToolchainLabel {
+                label: self.buck.node_toolchain.clone(),
+            });
+        }
+
+        if self.fixups.registry != FixupRegistry::None && self.fixups.registry_rev.is_none() {
+            warnings
+                .push("`[fixups].registry` is set but `registry_rev` is not pinned".to_string());
+        }
+
+        (errors, warnings)
+    }
+}
+
+/// Prove the directory is writable *without* creating it — `config check` is
+/// specified as side-effect free (spec §4), so it must not materialize
+/// `third_party_dir` merely by validating.
+///
+/// If the directory exists, probe it directly. If it does not, probe the
+/// nearest existing ancestor instead: that is what determines whether `pudu
+/// init` or `pudu buckify` could create it later.
+fn check_writable(dir: &Path) -> std::io::Result<()> {
+    let mut target = dir;
+    while !target.exists() {
+        match target.parent() {
+            Some(p) => target = p,
+            None => break,
+        }
+    }
+    let probe = target.join(".pudu-write-probe");
+    std::fs::write(&probe, b"")?;
+    std::fs::remove_file(&probe)
+}
+
+/// A Buck target label: `cell//path:target` or `//path:target`.
+fn is_buck_label(s: &str) -> bool {
+    let Some((cell_and_path, target)) = s.rsplit_once(':') else {
+        return false;
+    };
+    !target.is_empty() && cell_and_path.contains("//")
+}
+
+/// npm package naming rules, restricted to what pudu needs: lowercase, no
+/// spaces, optional `@scope/` prefix, and the URL-safe character set.
+fn is_npm_package_name(s: &str) -> bool {
+    fn segment_ok(seg: &str) -> bool {
+        !seg.is_empty()
+            && seg.len() <= 214
+            && !seg.starts_with('.')
+            && !seg.starts_with('_')
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-._~".contains(c))
+    }
+    match s.strip_prefix('@') {
+        Some(rest) => match rest.split_once('/') {
+            Some((scope, name)) => segment_ok(scope) && segment_ok(name),
+            None => false,
+        },
+        None => segment_ok(s),
+    }
 }
 
 #[cfg(test)]
@@ -400,5 +536,147 @@ registry_rev = "deadbeef"
                 "for input {input}"
             );
         }
+    }
+
+    use std::fs;
+
+    fn cfg(text: &str) -> Config {
+        Config::from_str(text, Path::new("pudu.toml")).unwrap()
+    }
+
+    fn tempdir_with_lockfile() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        d
+    }
+
+    #[test]
+    fn accepts_a_valid_config() {
+        let d = tempdir_with_lockfile();
+        let (errors, _) = cfg(GOOD).validate(d.path());
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn rejects_libc_on_darwin() {
+        let d = tempdir_with_lockfile();
+        let c = cfg(
+            "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.darwin-arm64]\nos=\"darwin\"\ncpu=\"arm64\"\nlibc=\"glibc\"\n",
+        );
+        let (errors, _) = c.validate(d.path());
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::LibcOnNonLinux { .. })),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_windows_platform() {
+        let d = tempdir_with_lockfile();
+        let c =
+            cfg("lockfile_path=\"pnpm-lock.yaml\"\n[platforms.win]\nos=\"win32\"\ncpu=\"x64\"\n");
+        let (errors, _) = c.validate(d.path());
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::WindowsUnsupported { .. })),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_platform_triples() {
+        let d = tempdir_with_lockfile();
+        let c = cfg(
+            "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"linux\"\ncpu=\"x64\"\nlibc=\"glibc\"\n[platforms.b]\nos=\"linux\"\ncpu=\"x64\"\nlibc=\"glibc\"\n",
+        );
+        let (errors, _) = c.validate(d.path());
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::DuplicatePlatform { .. })),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_bad_constraint_label() {
+        let d = tempdir_with_lockfile();
+        let c = cfg(
+            "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"linux\"\ncpu=\"x64\"\nconstraints=[\"not-a-label\"]\n",
+        );
+        let (errors, _) = c.validate(d.path());
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::BadConstraintLabel { .. })),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_scope_without_at_sign() {
+        let d = tempdir_with_lockfile();
+        let c = cfg(
+            "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"linux\"\ncpu=\"x64\"\n[registry]\nmyorg=\"https://x.example.com\"\n",
+        );
+        let (errors, _) = c.validate(d.path());
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::BadRegistryScope { .. })),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_bad_package_name_in_allow() {
+        let d = tempdir_with_lockfile();
+        let c = cfg(
+            "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"linux\"\ncpu=\"x64\"\n[scripts]\nallow=[\"Not A Package\"]\n",
+        );
+        let (errors, _) = c.validate(d.path());
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::BadPackageName { .. })),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_lockfile() {
+        let d = tempfile::tempdir().unwrap();
+        let (errors, _) = cfg(GOOD).validate(d.path());
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::LockfileNotFound { .. })),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_platforms() {
+        let d = tempdir_with_lockfile();
+        let c = cfg("lockfile_path=\"pnpm-lock.yaml\"\n");
+        let (errors, _) = c.validate(d.path());
+        assert!(
+            errors.iter().any(|e| matches!(e, ConfigError::NoPlatforms)),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn warns_on_single_platform_and_unpinned_registry() {
+        let d = tempdir_with_lockfile();
+        let c = cfg(
+            "lockfile_path=\"pnpm-lock.yaml\"\n[platforms.a]\nos=\"linux\"\ncpu=\"x64\"\n[fixups]\nregistry=\"github.com/o/r\"\n",
+        );
+        let (errors, warnings) = c.validate(d.path());
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
     }
 }
