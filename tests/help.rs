@@ -40,19 +40,30 @@ fn version_prints_the_crate_version() {
     assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
 }
 
+/// TD-S0-19: an unimplemented verb exits 4, distinct from a usage error (2)
+/// and from a config failure (3), so CI can branch on it.
 #[test]
-fn stubbed_verbs_report_their_stage_and_exit_two() {
+fn stubbed_verbs_report_their_stage_and_exit_four() {
     for (verb, stage) in [("vendor", "S3"), ("buckify", "S4"), ("audit", "Phase 2")] {
         let out = pudu().arg(verb).output().unwrap();
         let text = String::from_utf8(out.stderr).unwrap();
-        assert_eq!(out.status.code(), Some(2), "`{verb}` must exit 2:\n{text}");
+        assert_eq!(out.status.code(), Some(4), "`{verb}` must exit 4:\n{text}");
         assert!(text.contains("not implemented yet"), "{text}");
         assert!(text.contains(stage), "`{verb}` must name {stage}:\n{text}");
     }
 }
 
+/// A usage error, not an unimplemented verb: exit 2.
 #[test]
 fn debug_without_subcommand_exits_two() {
     let out = pudu().arg("debug").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+/// TD-S0-19: clap's own code for a bad command line stays 2, so pudu's
+/// usage errors and clap's agree.
+#[test]
+fn an_unknown_flag_exits_two() {
+    let out = pudu().arg("--nonsense").output().unwrap();
     assert_eq!(out.status.code(), Some(2));
 }

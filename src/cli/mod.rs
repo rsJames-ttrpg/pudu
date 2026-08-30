@@ -105,15 +105,10 @@ impl Cli {
             Commands::Fixups => Err(stub::unimplemented("fixups", "S7/S8")),
             Commands::Audit => Err(stub::unimplemented("audit", "Phase 2")),
             Commands::Unused => Err(stub::unimplemented("unused", "Phase 2")),
-            Commands::Debug { args } => Err(anyhow::anyhow!(
-                "pudu debug requires a subcommand (none exist yet; S1 adds \
-                 `print-graph`){}",
-                if args.is_empty() {
-                    String::new()
-                } else {
-                    format!(": unknown `{}`", args[0])
-                }
-            )),
+            Commands::Debug { args } => Err(crate::error::CliError::DebugNeedsSubcommand {
+                unknown: args.first().cloned(),
+            }
+            .into()),
         }
     }
 }

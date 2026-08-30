@@ -77,7 +77,9 @@ fn refuses_to_overwrite_without_force() {
     let d = workspace(true);
     pudu(d.path()).arg("init").output().unwrap();
     let out = pudu(d.path()).arg("init").output().unwrap();
-    assert!(!out.status.success());
+    // TD-S0-19: refusing to clobber pudu.toml is a usage error (2), not a
+    // config failure (3) or an internal one (1).
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("--force"), "{stderr}");
 }
@@ -400,4 +402,34 @@ fn init_creates_a_missing_target_directory() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(d.path().join("newdir/pudu.toml").is_file());
+}
+
+/// TD-S0-17/19: an unusable `supportedArchitectures` is a typed
+/// `DeriveError`, so it exits 3 (configuration invalid) — and the warnings
+/// explaining *why* every candidate was dropped ride along on the error
+/// rather than being lost.
+#[test]
+fn no_usable_platforms_exits_three_and_surfaces_the_warnings() {
+    let d = workspace(true);
+    std::fs::write(
+        d.path().join("pnpm-workspace.yaml"),
+        "supportedArchitectures:\n  os: [win32, solaris]\n  cpu: [x64]\n",
+    )
+    .unwrap();
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("no supported platforms"), "{stderr}");
+    assert!(
+        stderr.contains("win32"),
+        "the win32 skip must survive onto the error:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("solaris"),
+        "the unknown-os warning must survive onto the error:\n{stderr}"
+    );
+    assert!(
+        !d.path().join("pudu.toml").exists(),
+        "nothing is written when derivation fails"
+    );
 }

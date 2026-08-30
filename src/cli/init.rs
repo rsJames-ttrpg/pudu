@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::cli::toolchain::{self, AppendOutcome};
 use crate::config::Platform;
+use crate::error::{DeriveError, DeriveWarning};
 use crate::platform::{Cpu, Libc, Os};
 
 /// What an upward walk from the invocation directory found.
@@ -39,7 +40,7 @@ pub fn detect(start: &Path) -> Option<Detected> {
 #[derive(Debug)]
 pub struct DerivedPlatforms {
     pub platforms: BTreeMap<String, Platform>,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<DeriveWarning>,
 }
 
 #[derive(Deserialize)]
@@ -95,14 +96,17 @@ fn axis_present(v: &serde_norway::Value, key: &str) -> bool {
 ///
 /// Rules (spec §3.2): cross-product os × cpu; `libc` applies only to linux;
 /// `win32` is skipped with a warning; `current` resolves to the host.
-pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms, String> {
+pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms, DeriveError> {
     let mut warnings = Vec::new();
 
     let sa = match workspace_yaml {
         None => None,
         Some(text) => {
             serde_norway::from_str::<WorkspaceYaml>(text)
-                .map_err(|e| format!("cannot parse pnpm-workspace.yaml: {e}"))?
+                .map_err(|source| DeriveError::WorkspaceParse {
+                    path: PathBuf::from("pnpm-workspace.yaml"),
+                    source,
+                })?
                 .supported_architectures
         }
     };
@@ -117,9 +121,7 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
     if let Some(map) = sa.as_mapping() {
         for k in map.keys().filter_map(|k| k.as_str()) {
             if !matches!(k, "os" | "cpu" | "libc") {
-                warnings.push(format!(
-                    "pnpm-workspace.yaml: ignoring unrecognized supportedArchitectures key `{k}`"
-                ));
+                warnings.push(DeriveWarning::UnknownKey { key: k.to_string() });
             }
         }
     }
@@ -130,14 +132,10 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
             "current" => oses.push(host_os()),
             "linux" => oses.push(Os::Linux),
             "darwin" => oses.push(Os::Darwin),
-            "win32" => warnings.push(
-                "pnpm-workspace.yaml: skipping `win32` — Windows is a Phase 2 deliverable, \
-                 see https://github.com/rsJames-ttrpg/pudu/blob/main/docs/superpowers/specs/2026-08-30-pudu-roadmap.md"
-                    .to_string(),
-            ),
-            other => warnings.push(format!(
-                "pnpm-workspace.yaml: ignoring unknown os `{other}`"
-            )),
+            "win32" => warnings.push(DeriveWarning::Win32Skipped),
+            other => warnings.push(DeriveWarning::UnknownOs {
+                value: other.to_string(),
+            }),
         }
     }
 
@@ -147,9 +145,9 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
             "current" => cpus.push(host_cpu()),
             "x64" => cpus.push(Cpu::X64),
             "arm64" => cpus.push(Cpu::Arm64),
-            other => warnings.push(format!(
-                "pnpm-workspace.yaml: ignoring unknown cpu `{other}`"
-            )),
+            other => warnings.push(DeriveWarning::UnknownCpu {
+                value: other.to_string(),
+            }),
         }
     }
 
@@ -158,9 +156,9 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
         match raw.as_str() {
             "current" | "glibc" => libcs.push(Libc::Glibc),
             "musl" => libcs.push(Libc::Musl),
-            other => warnings.push(format!(
-                "pnpm-workspace.yaml: ignoring unknown libc `{other}`"
-            )),
+            other => warnings.push(DeriveWarning::UnknownLibc {
+                value: other.to_string(),
+            }),
         }
     }
 
@@ -225,18 +223,14 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
         } else {
             "libc"
         };
-        let mut msg = format!(
-            "pnpm-workspace.yaml declares no supported platforms pudu can target \
-             (the `{empty_axis}` axis resolved to nothing usable); edit supportedArchitectures or remove it"
-        );
-        if !warnings.is_empty() {
-            msg.push_str("\n\nwarnings encountered while expanding supportedArchitectures:");
-            for w in &warnings {
-                msg.push_str("\n  - ");
-                msg.push_str(w);
-            }
-        }
-        return Err(msg);
+        // The warnings ride along on the error: a user told "no usable
+        // platforms" needs to know *why* each candidate was dropped. They are
+        // carried as `#[related]` data rather than concatenated into the
+        // message, so tests can assert on them.
+        return Err(DeriveError::NoUsablePlatforms {
+            axis: empty_axis,
+            warnings,
+        });
     }
 
     Ok(DerivedPlatforms {
@@ -377,10 +371,7 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
 
     let config_path = root.join("pudu.toml");
     if config_path.exists() && !force {
-        anyhow::bail!(
-            "{} already exists; pass --force to overwrite",
-            config_path.display()
-        );
+        return Err(crate::error::CliError::ConfigExists { path: config_path }.into());
     }
 
     let found = detect(&root);
@@ -397,7 +388,7 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
         .map(|p| std::fs::read_to_string(p).with_context(|| format!("cannot read {}", p.display())))
         .transpose()?;
 
-    let derived = derive_platforms(ws_text.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
+    let derived = derive_platforms(ws_text.as_deref())?;
     for w in &derived.warnings {
         eprintln!("warning: {w}");
     }
@@ -634,15 +625,21 @@ mod tests {
         let d = derive_platforms(Some(yaml)).unwrap();
         assert_eq!(d.platforms.len(), 1);
         assert!(d.platforms.contains_key("linux-x64-gnu"));
-        assert_eq!(d.warnings.len(), 1);
-        assert!(d.warnings[0].contains("win32"), "{:?}", d.warnings);
+        assert_eq!(d.warnings, vec![DeriveWarning::Win32Skipped]);
     }
 
     #[test]
     fn only_win32_is_an_error() {
         let yaml = "supportedArchitectures:\n  os: [win32]\n  cpu: [x64]\n";
         let err = derive_platforms(Some(yaml)).unwrap_err();
-        assert!(err.contains("no supported platforms"), "{err}");
+        assert!(
+            matches!(
+                err,
+                DeriveError::NoUsablePlatforms { axis: "os", ref warnings }
+                    if warnings == &[DeriveWarning::Win32Skipped]
+            ),
+            "{err:?}"
+        );
     }
 
     /// The platform name this host resolves to, given a linux-vs-macos
@@ -681,8 +678,16 @@ mod tests {
     fn unusable_libc_axis_names_the_axis_and_surfaces_warnings() {
         let yaml = "supportedArchitectures:\n  os: [linux]\n  cpu: [x64]\n  libc: [uclibc]\n";
         let err = derive_platforms(Some(yaml)).unwrap_err();
-        assert!(err.contains("libc"), "{err}");
-        assert!(err.contains("uclibc"), "{err}");
+        // The axis is named, and the warnings explaining *why* it emptied
+        // ride along on the error rather than being dropped.
+        assert!(
+            matches!(
+                err,
+                DeriveError::NoUsablePlatforms { axis: "libc", ref warnings }
+                    if warnings == &[DeriveWarning::UnknownLibc { value: "uclibc".to_string() }]
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -690,10 +695,11 @@ mod tests {
         let yaml = "supportedArchitectures:\n  os: [linux]\n  cpu: [x64]\n  future: [thing]\n";
         let d = derive_platforms(Some(yaml)).unwrap();
         assert_eq!(d.platforms.len(), 1);
-        assert!(
-            d.warnings.iter().any(|w| w.contains("future")),
-            "{:?}",
-            d.warnings
+        assert_eq!(
+            d.warnings,
+            vec![DeriveWarning::UnknownKey {
+                key: "future".to_string()
+            }]
         );
     }
 

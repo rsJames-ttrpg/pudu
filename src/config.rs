@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use url::Url;
 
-use crate::error::{ConfigError, Result};
+use crate::error::{ConfigError, ConfigWarning, Result};
 use crate::platform::{Cpu, Libc, Os};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,7 +237,7 @@ impl Config {
     ///
     /// Collects every problem rather than short-circuiting, so `pudu config
     /// check` can report them all in one pass.
-    pub fn validate(&self, base_dir: &Path) -> (Vec<ConfigError>, Vec<String>) {
+    pub fn validate(&self, base_dir: &Path) -> (Vec<ConfigError>, Vec<ConfigWarning>) {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
 
@@ -254,10 +254,9 @@ impl Config {
         if self.platforms.is_empty() {
             errors.push(ConfigError::NoPlatforms);
         } else if self.platforms.len() == 1 {
-            warnings.push(
-                "only one platform is configured; generated rules will not vary by platform"
-                    .to_string(),
-            );
+            warnings.push(ConfigWarning::SinglePlatform {
+                name: self.platforms.keys().next().expect("len() == 1").clone(),
+            });
         }
 
         let mut seen: BTreeMap<(Os, Cpu, Option<Libc>), &str> = BTreeMap::new();
@@ -329,8 +328,7 @@ impl Config {
         }
 
         if self.fixups.registry != FixupRegistry::None && self.fixups.registry_rev.is_none() {
-            warnings
-                .push("`[fixups].registry` is set but `registry_rev` is not pinned".to_string());
+            warnings.push(ConfigWarning::UnpinnedFixupRegistry);
         }
 
         (errors, warnings)
@@ -510,11 +508,8 @@ registry_rev = "deadbeef"
             Path::new("pudu.toml"),
         )
         .unwrap_err();
-        assert!(
-            err.source_message().contains("widgets"),
-            "{}",
-            err.source_message()
-        );
+        let msg = crate::error::full_message(&err);
+        assert!(msg.contains("widgets"), "{msg}");
     }
 
     #[test]
@@ -849,6 +844,14 @@ registry_rev = "deadbeef"
         );
         let (errors, warnings) = c.validate(d.path());
         assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert_eq!(
+            warnings,
+            vec![
+                ConfigWarning::SinglePlatform {
+                    name: "a".to_string()
+                },
+                ConfigWarning::UnpinnedFixupRegistry,
+            ]
+        );
     }
 }
