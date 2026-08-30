@@ -216,11 +216,25 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
     }
 
     if platforms.is_empty() {
-        return Err(
+        let empty_axis = if oses.is_empty() {
+            "os"
+        } else if cpus.is_empty() {
+            "cpu"
+        } else {
+            "libc"
+        };
+        let mut msg = format!(
             "pnpm-workspace.yaml declares no supported platforms pudu can target \
-             (after skipping win32); edit supportedArchitectures or remove it"
-                .to_string(),
+             (the `{empty_axis}` axis resolved to nothing usable); edit supportedArchitectures or remove it"
         );
+        if !warnings.is_empty() {
+            msg.push_str("\n\nwarnings encountered while expanding supportedArchitectures:");
+            for w in &warnings {
+                msg.push_str("\n  - ");
+                msg.push_str(w);
+            }
+        }
+        return Err(msg);
     }
 
     Ok(DerivedPlatforms {
@@ -269,6 +283,25 @@ mod tests {
     fn detect_returns_none_without_a_lockfile() {
         let d = tempfile::tempdir().unwrap();
         assert!(detect(d.path()).is_none());
+    }
+
+    #[test]
+    fn detect_finds_a_sibling_workspace_yaml() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        std::fs::write(
+            d.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+        )
+        .unwrap();
+        let nested = d.path().join("packages/server");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let found = detect(&nested).expect("walks upward to the lockfile");
+        assert_eq!(
+            found.workspace_yaml,
+            Some(d.path().join("pnpm-workspace.yaml"))
+        );
     }
 
     #[test]
@@ -326,16 +359,44 @@ mod tests {
         assert!(err.contains("no supported platforms"), "{err}");
     }
 
+    /// The platform name this host resolves to, given a linux-vs-macos
+    /// split and an x64-vs-arm64 split — holds on ubuntu-latest,
+    /// ubuntu-24.04-arm, and macos-latest without hardcoding any one of
+    /// them.
+    fn expected_host_platform_name() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "darwin-arm64"
+        } else if cfg!(target_arch = "aarch64") {
+            "linux-arm64-gnu"
+        } else {
+            "linux-x64-gnu"
+        }
+    }
+
     #[test]
     fn current_resolves_to_the_host() {
         let yaml = "supportedArchitectures:\n  os: [current]\n  cpu: [current]\n";
         let d = derive_platforms(Some(yaml)).unwrap();
-        assert_eq!(
-            d.platforms.len(),
-            1,
-            "{:?}",
-            d.platforms.keys().collect::<Vec<_>>()
-        );
+        let names: Vec<&str> = d.platforms.keys().map(String::as_str).collect();
+        assert_eq!(names, [expected_host_platform_name()]);
+    }
+
+    #[test]
+    fn absent_os_and_cpu_axes_fall_back_to_the_host() {
+        // Only `libc` is declared; `os`/`cpu` keys are entirely absent, so
+        // both must default to the host rather than staying empty.
+        let yaml = "supportedArchitectures:\n  libc: [glibc]\n";
+        let d = derive_platforms(Some(yaml)).unwrap();
+        let names: Vec<&str> = d.platforms.keys().map(String::as_str).collect();
+        assert_eq!(names, [expected_host_platform_name()]);
+    }
+
+    #[test]
+    fn unusable_libc_axis_names_the_axis_and_surfaces_warnings() {
+        let yaml = "supportedArchitectures:\n  os: [linux]\n  cpu: [x64]\n  libc: [uclibc]\n";
+        let err = derive_platforms(Some(yaml)).unwrap_err();
+        assert!(err.contains("libc"), "{err}");
+        assert!(err.contains("uclibc"), "{err}");
     }
 
     #[test]
