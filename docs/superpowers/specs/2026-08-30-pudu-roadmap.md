@@ -33,9 +33,17 @@ The credible-launch surface: typescript, esbuild, express, zod, vitest, `@swc/co
 - Platform validation rejects an unknown `os`/`cpu`/`libc` value with the list of valid ones.
 - CI green on `ubuntu-latest`, `ubuntu-24.04-arm`, `macos-latest`.
 
-**Demo:** From an empty repo, `pudu init` produces a config that `pudu config-check` accepts.
+**Demo:** From an empty repo, `pudu init` produces a config that `pudu config check` accepts.
 
 **Touches:** `src/main.rs`, `src/cli/`, `src/config.rs`, `src/error.rs`, `.github/workflows/`.
+
+**Shipped 2026-08-30:** 18 commits, 78 tests (55 unit + 23 integration), CI gates green on stable. All ten exit criteria verified by hand against the built binary. Three defects were found in the plan itself rather than in the implementations, each caught by adversarial review rather than by the plan's own tests:
+
+- **`toolchain::apply` used first-occurrence marker matching**, so a `toolchains/BUCK` with two BEGIN markers took the replace path under `--force` and destroyed every user rule between the first BEGIN and the END. Fixed by requiring exactly one of each marker.
+- **`pudu init --force` silently overwrote hand-edited files under `third-party/js/`**, including a `toolchains.bzl` whose own generated header says "Safe to edit". Resolved by a spec change: `--force` now governs `pudu.toml` and the `toolchains/BUCK` managed block only.
+- **The `supportedArchitectures` axis fallback could not distinguish "key absent" from "key present but filtered empty"**, so `os: [win32]` silently substituted the host OS instead of erroring.
+
+Also corrected: the plan wrongly asserted `serde_json` was already a dependency, and declared `rust-version = "1.85"` while using `let`-chains (stabilized in 1.88). Deferred minors are logged in [`../TECH_DEBT.md`](../TECH_DEBT.md).
 
 ---
 
@@ -248,8 +256,9 @@ S1 and S2 can be developed in parallel after S0; both feed S3.
 |---|---|---|---|
 | Design | [2026-08-30-pudu-design.md](./2026-08-30-pudu-design.md) | n/a | ✅ committed |
 | Roadmap | this document | n/a | ✅ committed |
-| S0 | [2026-08-30-pudu-s0-scaffolding-design.md](./2026-08-30-pudu-s0-scaffolding-design.md) | (not yet written) | 🟡 spec written |
-| S1–S9 | (not yet written) | (not yet written) | ⬜ planned |
+| S0 | [2026-08-30-pudu-s0-scaffolding-design.md](./2026-08-30-pudu-s0-scaffolding-design.md) | [2026-08-30-pudu-s0-scaffolding.md](../plans/2026-08-30-pudu-s0-scaffolding.md) | ✅ shipped (18 commits, 78 tests) |
+| S1 | (not yet written) | (not yet written) | ⬜ next |
+| S2–S9 | (not yet written) | (not yet written) | ⬜ planned |
 
 ---
 
