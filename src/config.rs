@@ -139,7 +139,7 @@ impl Default for RawFixups {
         Self {
             registry: default_fixup_registry(),
             registry_rev: None,
-            allow_local_overrides: true,
+            allow_local_overrides: default_true(),
         }
     }
 }
@@ -287,6 +287,49 @@ file_name = "BUCK"
     }
 
     #[test]
+    fn applies_field_level_defaults_when_tables_are_partial() {
+        // Every table is present but only partially populated, so the
+        // field-level `#[serde(default = ...)]` attributes on RawRegistry,
+        // RawBuck, and RawFixups fire (not just the struct-level `Default`
+        // impls used when a whole table is omitted).
+        let c = Config::from_str(
+            r#"
+lockfile_path = "x"
+[platforms.p]
+os = "linux"
+cpu = "x64"
+
+[registry]
+"@myorg" = "https://npm.example.com"
+
+[buck]
+file_name = "CUSTOM_BUCK"
+
+[fixups]
+registry_rev = "deadbeef"
+"#,
+            Path::new("pudu.toml"),
+        )
+        .unwrap();
+
+        assert_eq!(c.registry.default.as_str(), "https://registry.npmjs.org/");
+        assert_eq!(c.buck.file_name, "CUSTOM_BUCK");
+        assert_eq!(c.buck.node_toolchain, "toolchains//:node");
+        assert_eq!(c.fixups.registry, FixupRegistry::None);
+        assert!(c.fixups.allow_local_overrides);
+    }
+
+    #[test]
+    fn explicit_allow_local_overrides_false_is_honored() {
+        let c = Config::from_str(
+            "lockfile_path = \"x\"\n[platforms.p]\nos=\"linux\"\ncpu=\"x64\"\n[fixups]\nallow_local_overrides = false\n",
+            Path::new("pudu.toml"),
+        )
+        .unwrap();
+        assert!(!c.fixups.allow_local_overrides);
+    }
+
+    #[test]
     fn rejects_unknown_top_level_key() {
         let err = Config::from_str(
             "lockfile_path = \"x\"\nwidgets = 3\n[platforms.p]\nos=\"linux\"\ncpu=\"x64\"\n",
@@ -335,5 +378,27 @@ file_name = "BUCK"
         let text = "lockfile_path=\"x\"\n[platforms.p]\nos=\"linux\"\ncpu=\"x64\"\n[fixups]\nregistry=\"gitlab.com/a/b\"\n";
         let err = Config::from_str(text, Path::new("pudu.toml")).unwrap_err();
         assert!(matches!(err, ConfigError::BadFixupRegistry { .. }));
+    }
+
+    #[test]
+    fn rejects_malformed_github_fixup_registry_forms() {
+        // These all reach the `github.com/` prefix branch and must fail the
+        // (Some, Some, None) arity/non-empty-segment match, not just the
+        // prefix check.
+        for input in [
+            "github.com/a/b/c", // too many segments
+            "github.com/a",     // too few segments
+            "github.com/",      // empty owner and repo
+            "github.com/a/",    // empty repo
+        ] {
+            let text = format!(
+                "lockfile_path=\"x\"\n[platforms.p]\nos=\"linux\"\ncpu=\"x64\"\n[fixups]\nregistry=\"{input}\"\n"
+            );
+            let err = Config::from_str(&text, Path::new("pudu.toml")).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::BadFixupRegistry { .. }),
+                "for input {input}"
+            );
+        }
     }
 }
