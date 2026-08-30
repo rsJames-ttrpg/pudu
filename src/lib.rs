@@ -2,6 +2,7 @@
 //!
 //! No public API is committed in v1.
 
+pub mod cli;
 pub mod config;
 pub mod error;
 pub mod platform;
