@@ -1,0 +1,52 @@
+[package]
+name          = "pudu"
+version       = "0.1.0"
+edition       = "2024"
+rust-version  = "1.85"
+description   = "Translate pnpm-lock.yaml into Buck2 build rules"
+authors       = ["Jack Mayo <jackomayo@gmail.com>"]
+license       = "MIT"
+readme        = "README.md"
+repository    = "https://github.com/rsJames-ttrpg/pudu"
+homepage      = "https://github.com/rsJames-ttrpg/pudu"
+documentation = "https://docs.rs/pudu"
+keywords      = ["buck2", "javascript", "pnpm", "lockfile", "build-system"]
+categories    = ["development-tools::build-utils", "command-line-utilities"]
+exclude       = ["tests/fixtures/**", "docs/**"]
+
+[[bin]]
+name = "pudu"
+path = "src/main.rs"
+
+[lib]
+name = "pudu"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+clap = { version = "4.6.6", features = ["derive"] }
+dirs = "6.0.0"
+flate2 = "1.1.10"
+gix = { version = "0.87.1", features = ["blocking-network-client"] }
+glob = "0.3.4"
+miette = { version = "7.6.0", features = ["fancy"] }
+nodejs-semver = "5.0.0"
+pathdiff = "0.2.3"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "http2"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_norway = "0.9.42"
+sha2 = "0.11.0"
+tar = "0.4.46"
+tempfile = "3.27.0"
+thiserror = "2.0.20"
+toml = "1.1.4"
+toml_edit = "0.25.13"
+url = "2.5.8"
+walkdir = "2.5.0"
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+httpmock = "0.8.3"
+insta = { version = "1.48.0", features = ["yaml"] }
+predicates = "3.1.4"
