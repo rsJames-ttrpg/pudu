@@ -4,15 +4,33 @@ fn pudu() -> Command {
     Command::cargo_bin("pudu").expect("binary builds")
 }
 
+/// The verb surface, locked. A substring loop cannot see a renamed verb
+/// whose old name still appears elsewhere in the help, cannot see
+/// reordering, and never checks the `[UNIMPLEMENTED — <stage>]` markers
+/// (exit criterion 6). A snapshot sees all three: any change to the verbs,
+/// their order, their one-line descriptions, or their stage labels has to be
+/// reviewed and re-accepted.
 #[test]
-fn help_lists_every_phase_one_verb() {
+fn help_output_is_stable() {
     let out = pudu().arg("--help").output().unwrap();
+    assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
-    for verb in [
-        "init", "vendor", "buckify", "fixups", "audit", "unused", "config", "debug",
-    ] {
-        assert!(text.contains(verb), "--help must list `{verb}`:\n{text}");
-    }
+    insta::assert_snapshot!(text);
+}
+
+/// I5: clap turns the doc comment into long help, so an implementation
+/// note left on the variant ships to users. Snapshotted so it cannot come
+/// back.
+#[test]
+fn debug_long_help_is_stable() {
+    let out = pudu().args(["debug", "--help"]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !text.contains("uninhabited"),
+        "internal rationale must not reach users:\n{text}"
+    );
+    insta::assert_snapshot!(text);
 }
 
 #[test]

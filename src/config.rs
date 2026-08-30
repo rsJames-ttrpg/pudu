@@ -247,7 +247,7 @@ impl Config {
         }
 
         let tpd = base_dir.join(&self.third_party_dir);
-        if let Err(source) = check_writable(&tpd) {
+        if let Err(source) = check_writable(&tpd, base_dir) {
             errors.push(ConfigError::ThirdPartyDirNotWritable { path: tpd, source });
         }
 
@@ -344,17 +344,30 @@ impl Config {
 /// If the directory exists, probe it directly. If it does not, probe the
 /// nearest existing ancestor instead: that is what determines whether `pudu
 /// init` or `pudu buckify` could create it later.
-fn check_writable(dir: &Path) -> std::io::Result<()> {
+///
+/// M7: the ascent is bounded — it stops at `base_dir`, and never reaches the
+/// filesystem root, so a `third_party_dir` whose ancestors do not exist
+/// reports that instead of probing `/`. The probe file is created by
+/// `tempfile`, since a fixed name lets two concurrent `pudu config check`
+/// runs in one directory delete each other's probe and report a spurious
+/// failure.
+fn check_writable(dir: &Path, base_dir: &Path) -> std::io::Result<()> {
     let mut target = dir;
     while !target.exists() {
+        if target == base_dir {
+            break;
+        }
         match target.parent() {
-            Some(p) => target = p,
-            None => break,
+            // `p.parent().is_some()` is false only for the filesystem root:
+            // whether `/` is writable says nothing about `third_party_dir`.
+            Some(p) if p.parent().is_some() => target = p,
+            _ => break,
         }
     }
-    let probe = target.join(".pudu-write-probe");
-    std::fs::write(&probe, b"")?;
-    std::fs::remove_file(&probe)
+    tempfile::Builder::new()
+        .prefix(".pudu-write-probe")
+        .tempfile_in(target)
+        .map(|_| ())
 }
 
 /// A Buck target label: `cell//path:target` or `//path:target`.
@@ -779,6 +792,53 @@ registry_rev = "deadbeef"
             "validate() must not create third_party_dir or its ancestors"
         );
         assert!(!tpd.join("js").exists());
+    }
+
+    /// M7: the ancestor walk must stop before the filesystem root. Probing
+    /// `/` reports whatever `/`'s permissions happen to be (EACCES for a
+    /// normal user, success for root) rather than anything about
+    /// `third_party_dir`, so the reported cause must be the missing
+    /// directory itself.
+    #[test]
+    fn absolute_third_party_dir_with_no_existing_ancestor_reports_not_found() {
+        let d = tempdir_with_lockfile();
+        let c = cfg(
+            "lockfile_path=\"pnpm-lock.yaml\"\nthird_party_dir=\"/pudu-nonexistent-ancestor-test/js\"\n[platforms.a]\nos=\"linux\"\ncpu=\"x64\"\n",
+        );
+        let (errors, _) = c.validate(d.path());
+        let found = errors.iter().find_map(|e| match e {
+            ConfigError::ThirdPartyDirNotWritable { source, .. } => Some(source.kind()),
+            _ => None,
+        });
+        assert_eq!(
+            found,
+            Some(std::io::ErrorKind::NotFound),
+            "expected a NotFound cause, got {errors:?}"
+        );
+    }
+
+    /// M7: a fixed probe filename lets concurrent `pudu config check` runs
+    /// in one directory delete each other's probe, producing a spurious
+    /// "not writable" failure.
+    #[test]
+    fn concurrent_validation_of_one_directory_does_not_race() {
+        let d = tempdir_with_lockfile();
+        let base = d.path().to_path_buf();
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let base = base.clone();
+                std::thread::spawn(move || {
+                    let c = cfg(GOOD);
+                    for _ in 0..50 {
+                        let (errors, _) = c.validate(&base);
+                        assert!(errors.is_empty(), "spurious failure: {errors:?}");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 
     #[test]
