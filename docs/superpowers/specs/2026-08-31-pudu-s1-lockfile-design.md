@@ -479,33 +479,80 @@ to stdout, exits 0. Errors go through `error::render` like every other
 command.
 
 Output is deterministic — `BTreeMap` ordering throughout, no `HashMap`
-anywhere in the serialization path — so it can be an `insta` snapshot:
+anywhere in the serialization path — so it can be an `insta` snapshot.
+
+### Key-spelling rule
+
+Two vocabularies meet in this document, and the casing says which is which:
+
+- **Fields pudu invents are `snake_case`**: `lockfile_version`, `target_name`,
+  `link_name`, `edges`, `peers`, `cycles`, `roots`.
+- **Fields echoed from the lockfile keep pnpm's own `camelCase`**: `hasBin`,
+  `autoInstallPeers`, `excludeLinksFromLockfile`, `peerDependencies`,
+  `bundledDependencies`.
+
+This falls out of the types carrying `#[serde(rename_all = "camelCase")]` so
+they round-trip pnpm's YAML, and it is kept deliberately rather than worked
+around: a key read from `print-graph` output can be grepped straight into
+`pnpm-lock.yaml` and found. Forcing uniform snake_case would need per-field
+`rename(deserialize = …)` on every echoed struct and would break that
+correspondence. The rule is pinned by
+`json_keys_follow_the_invented_vs_echoed_spelling_rule`, which asserts both
+directions including the negatives.
+
+### Shape
+
+Verbatim from a real run against the committed fixture, trimmed to one node
+and one edge:
 
 ```json
 {
   "lockfile_version": "9.0",
-  "settings": { "auto_install_peers": true, "exclude_links_from_lockfile": false },
+  "settings": {
+    "autoInstallPeers": true,
+    "excludeLinksFromLockfile": false
+  },
   "roots": [
-    { "importer": ".", "link_name": "svelte", "target": "svelte@5.49.1", "kind": "dev" }
+    { "importer": ".", "link_name": "glob", "target": "glob@10.4.5",
+      "specifier": "10.4.5", "kind": "dev" }
   ],
   "nodes": {
-    "@babel/core@7.28.6": {
-      "name": "@babel/core", "version": "7.28.6", "peers": [],
-      "target_name": "@babel+core@7.28.6",
+    "glob@10.4.5": {
+      "name": "glob",
+      "version": "10.4.5",
+      "peers": [],
+      "target_name": "glob@10.4.5",
       "optional": false,
-      "meta": { "integrity": "sha512-…", "has_bin": false, "os": null, "cpu": null, "libc": null },
+      "meta": {
+        "resolution": { "integrity": "sha512-7Bv8RF0k6xjo…" },
+        "engines": {},
+        "os": null, "cpu": null, "libc": null,
+        "hasBin": true,
+        "deprecated": "Old versions of glob are not supported…",
+        "peerDependencies": {},
+        "peerDependenciesMeta": {},
+        "bundledDependencies": []
+      },
       "edges": [
-        { "link_name": "@babel/helper-module-transforms",
-          "target": "@babel/helper-module-transforms@7.28.6(@babel/core@7.28.6)",
+        { "link_name": "foreground-child",
+          "target": "foreground-child@3.3.1",
           "kind": "prod" }
       ]
     }
   },
   "cycles": [
-    ["@babel/core@7.28.6", "@babel/helper-module-transforms@7.28.6(@babel/core@7.28.6)", "@babel/core@7.28.6"]
+    ["browserslist@4.28.1",
+     "update-browserslist-db@1.2.3(browserslist@4.28.1)",
+     "browserslist@4.28.1"]
   ]
 }
 ```
+
+`meta` is the whole `packages:` entry rather than a curated subset, so nothing
+is lost before S2 and S3 need it. `roots` carries the raw `specifier` (§6.3),
+which is how a `workspace:` root is recognisable even though its `target` is
+`null`. A cycle is a **closed path** — entry node repeated — so it reads as a
+walk rather than requiring the reader to know the array is cyclic.
 
 ---
 

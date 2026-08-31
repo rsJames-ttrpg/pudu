@@ -105,7 +105,13 @@ fn json_keys_follow_the_invented_vs_echoed_spelling_rule() {
     assert!(meta["resolution"].get("integrity").is_some(), "{meta}");
     assert!(meta.get("hasBin").is_some(), "{meta}");
     assert!(meta.get("has_bin").is_none());
-    assert!(meta.get("os").is_some() || meta["os"].is_null(), "{meta}");
+    // `os` is serialized even when null, so assert presence outright. The
+    // disjunction this replaced was vacuous: serde_json's Index returns Null
+    // for a missing key, so `is_null()` was always true when `get` was None.
+    assert!(
+        meta.get("os").is_some(),
+        "os must be present even when null: {meta}"
+    );
 }
 
 #[test]
