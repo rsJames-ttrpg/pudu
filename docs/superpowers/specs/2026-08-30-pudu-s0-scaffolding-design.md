@@ -29,7 +29,7 @@ pudu --help                        # lists all phase-1 verbs
 pudu --version                     # crate version (build id deferred to S9)
 ```
 
-Registered but stubbed — each prints `error: pudu <verb> is not implemented yet (planned for S<n>); see docs/superpowers/specs/` and exits 2:
+Registered but stubbed — each reports `pudu <verb> is not implemented yet (planned for S<n>)` and exits 4 (§6.1):
 
 ```
 pudu vendor        # UNIMPLEMENTED (S3)
@@ -285,7 +285,85 @@ S0 implements `ConfigError` in `src/error.rs` with variants covering the §4 val
 
 **Contract, enforced by snapshot tests:** every error message names a field or a file by path, and carries line/column where the source position is known.
 
-`miette` integration stays minimal at S0 — message plus position. Rich source-span rendering is deferred to S7, where the fixup `cfg()` parser needs it far more.
+`miette` integration stays minimal at S0 — message, `code`, `help`, and position. Rich source-span rendering (pointing into `pudu.toml` itself) is deferred to S7, where the fixup `cfg()` parser needs it far more.
+
+Rendering is centralized in `error::render`, which `main` and `pudu config
+check` both call, so every diagnostic pudu prints has the same shape. Line
+wrapping is disabled: messages name absolute paths and Buck labels, and a path
+broken across lines is neither greppable nor copy-pasteable.
+
+**Warnings are typed too.** `ConfigWarning` (from `Config::validate`),
+`DeriveWarning` (from `pudu init`'s `supportedArchitectures` expansion) and
+`InitWarning` (from `pudu init`'s scaffolding pass — cell-root guess, an
+existing third-party file, an existing or unparseable node toolchain) are
+`thiserror` + `miette` enums carrying `severity(Warning)`, not `Vec<String>`.
+They live in `src/error.rs` beside the error enums, one enum per producing
+module: the variant sets are disjoint, and warning tests assert on variants
+rather than on prose, which is the whole point of typing them. `DeriveWarning`
+and `InitWarning` stay separate for the same reason — `DeriveWarning` is part
+of the contract of the pure `derive_platforms` function, returned in
+`DerivedPlatforms::warnings` and carried as `#[related]` on
+`DeriveError::NoUsablePlatforms`, where a "file already exists" finding would
+be nonsense. **No diagnostic is printed with a raw `eprintln!`**: every one
+goes through `error::render`.
+
+Where an error needs the warnings that led to it — `DeriveError::NoUsablePlatforms`
+must tell a user *why* every candidate platform was dropped — they are carried
+as a `#[related]` field and rendered by miette, not concatenated into the
+message string.
+
+### 6.1 Exit codes
+
+CI scripts branch on these (`--check` semantics land in S3), so they are part
+of the CLI contract, not an implementation detail:
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Internal or unexpected error — I/O failure, anything unclassified |
+| `2` | Usage error. clap's own code for a bad command line; pudu's own usage refusals (`pudu.toml` already exists, `pudu debug` with no subcommand, `-C` naming a directory that is not there) match it |
+| `3` | Input invalid — validation failed, or a file pudu reads is missing or malformed |
+| `4` | Verb registered but not implemented yet |
+
+**A malformed *input* file exits `3`, the same as a malformed `pudu.toml`** —
+`pnpm-lock.yaml` from S1 on, and fixup TOML from S7. Code `3` means "pudu's
+inputs are wrong; fix the files and re-run", not "`pudu.toml` specifically":
+a CI script's response is identical either way, and the diagnostic `code`
+(`pudu::lock::parse` against `pudu::config::parse`) is the stable, grep-able
+identifier for anything that does need to tell them apart. `1` stays reserved
+for pudu itself failing.
+
+`ExitCode` lives in `src/error.rs`; `error::classify` maps an `anyhow::Error`
+from the CLI boundary onto both its diagnostic and its exit code by
+downcasting to the typed errors. **Anything unclassified is `1`**: an
+unexpected I/O failure is not a configuration problem and must not be reported
+as one.
+
+`classify` is generated from a single `typed_errors!` registry listing each
+typed error and its exit code, so adding one (S1's `LockfileError`) is one
+edit in one place. The two hand-maintained downcast chains it replaced could
+be half-updated: registering only in the renderer silently exited `1`, and
+registering only in the exit-code mapper rendered with no `code`/`help`.
+A unit test asserts every registered type classifies to a non-`Internal` code
+*and* a diagnostic carrying a `code`.
+
+A subcommand that has already printed its own diagnostics returns a summary
+error purely to carry the exit code; `CliError::already_reported` tells `main`
+not to render it again. `pudu config check` therefore prints one diagnostic per
+problem, a count line only when there is more than one, and — in `--format
+json` — nothing on stderr at all, since the envelope on stdout already carries
+`ok` and the error list.
+
+Every diagnostic is prefixed by its bare `code` line (`pudu::config::parse`).
+miette 7.6 emits it unconditionally whenever `code()` is `Some`, and it is
+worth its two lines: it is the only stable, prose-independent identifier a CI
+script or a bug report can grep. If field feedback disagrees, the escape hatch
+is a `Terse` newtype wrapping a `&dyn Diagnostic` and delegating everything
+except `code() -> None`. Not built.
+
+The codes are deliberately not printed in `--help`. The help output is already
+the densest surface in the tool, and a table of exit codes there would push the
+verb list further from the top for a fact that belongs in this spec.
 
 ---
 
@@ -347,7 +425,7 @@ The existing three-runner workflow covers S0 unchanged. No new jobs.
 5. The toolchain append satisfies every row of §3.3; three consecutive runs leave `toolchains/BUCK` byte-identical; a pre-existing node toolchain is left untouched and recorded in `pudu.toml`.
 6. `pudu --help` lists all phase-1 verbs with unimplemented ones marked; `pudu --version` prints the crate version. (A build identifier needs a `build.rs`; deferred to S9 with the rest of the version-string polish.)
 7. `pudu config check` accepts a good config and rejects each of the ten §4 classes with an error naming the field or file.
-8. `pudu debug` with no subcommand errors and exits 2; every stubbed verb reports its planned stage and exits 2.
+8. `pudu debug` with no subcommand errors and exits 2 (usage); every stubbed verb reports its planned stage and exits 4 (§6.1).
 9. CI green on all three runners: build, test, clippy `-D warnings`, fmt `--check`.
 10. Snapshot tests pass, and running them twice produces no diff.
 

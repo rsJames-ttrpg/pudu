@@ -90,8 +90,14 @@ pub enum ConfigCommands {
 impl Cli {
     pub fn run(self) -> anyhow::Result<()> {
         if let Some(dir) = &self.directory {
-            std::env::set_current_dir(dir).map_err(|e| {
-                anyhow::anyhow!("cannot change directory to {}: {e}", dir.display())
+            // Typed, so a bad `-C` exits 2 like pudu's other usage refusals
+            // (spec §6.1) and prints with a `code` like every other
+            // diagnostic, rather than falling through to the unclassified 1.
+            std::env::set_current_dir(dir).map_err(|source| {
+                crate::error::CliError::BadDirectory {
+                    path: dir.clone(),
+                    source,
+                }
             })?;
         }
 
@@ -105,15 +111,10 @@ impl Cli {
             Commands::Fixups => Err(stub::unimplemented("fixups", "S7/S8")),
             Commands::Audit => Err(stub::unimplemented("audit", "Phase 2")),
             Commands::Unused => Err(stub::unimplemented("unused", "Phase 2")),
-            Commands::Debug { args } => Err(anyhow::anyhow!(
-                "pudu debug requires a subcommand (none exist yet; S1 adds \
-                 `print-graph`){}",
-                if args.is_empty() {
-                    String::new()
-                } else {
-                    format!(": unknown `{}`", args[0])
-                }
-            )),
+            Commands::Debug { args } => Err(crate::error::CliError::DebugNeedsSubcommand {
+                unknown: args.first().cloned(),
+            }
+            .into()),
         }
     }
 }

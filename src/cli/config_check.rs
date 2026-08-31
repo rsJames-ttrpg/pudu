@@ -2,7 +2,10 @@
 
 use std::path::Path;
 
+use miette::Diagnostic;
+
 use crate::config::Config;
+use crate::error::{CliError, full_message, render};
 
 /// Output format for `pudu config check`.
 ///
@@ -33,53 +36,84 @@ fn emit_json(errors: &[String], warnings: &[String]) -> anyhow::Result<()> {
 /// `pudu.toml` is exactly the case `--format json` exists for, and emitting
 /// nothing on stdout there makes `pudu config check --format json | jq -e .ok`
 /// a parse error rather than `false`.
-fn fail_early(json: bool, message: String) -> anyhow::Result<()> {
-    if json {
-        emit_json(std::slice::from_ref(&message), &[])?;
-        anyhow::bail!("1 error(s) in pudu.toml");
+///
+/// The returned error is what `main` renders and classifies; in JSON mode it
+/// is the count summary, since the detail already went out as JSON.
+fn fail_early<E>(json: bool, err: E) -> anyhow::Error
+where
+    E: Diagnostic + Send + Sync + 'static,
+{
+    if !json {
+        return err.into();
     }
-    Err(anyhow::anyhow!(message))
+    // TD-S0-16: `full_message` joins the cause chain, so an error with no
+    // `#[source]` is reported exactly once.
+    if let Err(e) = emit_json(&[full_message(&err)], &[]) {
+        return e;
+    }
+    CliError::ConfigInvalid { count: 1 }.into()
 }
 
 /// Validate `pudu.toml` in the current directory.
 ///
 /// JSON goes to stdout in both the ok and error cases so CI can parse it;
-/// human-readable errors go to stderr.
+/// human-readable diagnostics go to stderr, rendered through miette so
+/// `code` and `help` reach the user (spec §6).
 pub fn run(format: OutputFormat) -> anyhow::Result<()> {
     let json = format == OutputFormat::Json;
     let path = Path::new("pudu.toml");
 
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) => return fail_early(json, format!("cannot read {}: {e}", path.display())),
+        Err(source) => {
+            return Err(fail_early(
+                json,
+                CliError::ConfigUnreadable {
+                    path: path.to_path_buf(),
+                    source,
+                },
+            ));
+        }
     };
 
     let config = match Config::from_str(&text, path) {
         Ok(c) => c,
-        Err(e) => return fail_early(json, format!("{e}: {}", e.source_message())),
+        Err(e) => return Err(fail_early(json, e)),
     };
 
     let base = std::env::current_dir()?;
     let (errors, warnings) = config.validate(&base);
 
     if json {
-        let errors: Vec<String> = errors.iter().map(|e| format!("{e:#}")).collect();
+        let errors: Vec<String> = errors.iter().map(|e| full_message(e)).collect();
+        let warnings: Vec<String> = warnings.iter().map(ToString::to_string).collect();
         emit_json(&errors, &warnings)?;
         if errors.is_empty() {
             return Ok(());
         }
-        anyhow::bail!("{} error(s) in pudu.toml", errors.len());
+        return Err(CliError::ConfigInvalid {
+            count: errors.len(),
+        }
+        .into());
     }
 
     for w in &warnings {
-        eprintln!("warning: {w}");
+        eprint!("{}", render(w));
     }
 
     if !errors.is_empty() {
         for e in &errors {
-            eprintln!("error: {e:#}");
+            eprint!("{}", render(e));
         }
-        anyhow::bail!("{} error(s) in pudu.toml", errors.len());
+        // Only worth saying when the count is not obvious from the output
+        // above; `main` does not render this error (`already_reported`).
+        if errors.len() > 1 {
+            eprintln!("{} errors in pudu.toml", errors.len());
+        }
+        return Err(CliError::ConfigInvalid {
+            count: errors.len(),
+        }
+        .into());
     }
 
     let names: Vec<&str> = config.platforms.keys().map(String::as_str).collect();

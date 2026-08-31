@@ -77,7 +77,9 @@ fn refuses_to_overwrite_without_force() {
     let d = workspace(true);
     pudu(d.path()).arg("init").output().unwrap();
     let out = pudu(d.path()).arg("init").output().unwrap();
-    assert!(!out.status.success());
+    // TD-S0-19: refusing to clobber pudu.toml is a usage error (2), not a
+    // config failure (3) or an internal one (1).
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("--force"), "{stderr}");
 }
@@ -325,6 +327,12 @@ fn unparseable_toolchain_name_falls_back_and_says_so() {
         stderr.contains("could not read the target name"),
         "the fallback must be announced: {stderr}"
     );
+    // I4: announced as a diagnostic, not a bare `warning:` line.
+    assert!(
+        stderr.contains("pudu::init::toolchain_name_unparsed"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("warning:"), "{stderr}");
 }
 
 /// I8: the `root//` load label is anchored at the Buck cell root, not at
@@ -354,6 +362,10 @@ fn load_label_is_relative_to_the_lockfile_directory() {
     assert!(
         stderr.contains("cell root"),
         "an ambiguous cell root must be warned about: {stderr}"
+    );
+    assert!(
+        stderr.contains("pudu::init::cell_root_guess"),
+        "I4: the guess is a typed diagnostic:\n{stderr}"
     );
 }
 
@@ -400,4 +412,78 @@ fn init_creates_a_missing_target_directory() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(d.path().join("newdir/pudu.toml").is_file());
+}
+
+/// TD-S0-17/19: an unusable `supportedArchitectures` is a typed
+/// `DeriveError`, so it exits 3 (configuration invalid) — and the warnings
+/// explaining *why* every candidate was dropped ride along on the error
+/// rather than being lost.
+#[test]
+fn no_usable_platforms_exits_three_and_surfaces_the_warnings() {
+    let d = workspace(true);
+    std::fs::write(
+        d.path().join("pnpm-workspace.yaml"),
+        "supportedArchitectures:\n  os: [win32, solaris]\n  cpu: [x64]\n",
+    )
+    .unwrap();
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("no supported platforms"), "{stderr}");
+    assert!(
+        stderr.contains("win32"),
+        "the win32 skip must survive onto the error:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("solaris"),
+        "the unknown-os warning must survive onto the error:\n{stderr}"
+    );
+    assert!(
+        !d.path().join("pudu.toml").exists(),
+        "nothing is written when derivation fails"
+    );
+}
+
+/// I4: spec §6 promises every diagnostic pudu prints has the same shape.
+/// `init`'s scaffolding warnings used to be raw `eprintln!("warning: ...")`,
+/// so an idempotent `--force` re-run — the common case — printed only the
+/// un-typed shape. They are `InitWarning`s rendered through `error::render`
+/// now.
+#[test]
+fn init_warnings_render_as_diagnostics_on_the_file_exists_path() {
+    let d = workspace(true);
+    pudu(d.path()).arg("init").output().unwrap();
+
+    let out = pudu(d.path()).args(["init", "--force"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("pudu::init::third_party_file_exists"),
+        "the file-exists warning must carry its diagnostic code:\n{stderr}"
+    );
+    assert!(stderr.contains("exists; leaving it alone"), "{stderr}");
+    assert!(
+        !stderr.contains("warning:"),
+        "no raw `warning:` line may survive alongside the typed shape:\n{stderr}"
+    );
+}
+
+/// A `DeriveWarning` on the success path renders as the same diagnostic it
+/// does when it rides along on `DeriveError::NoUsablePlatforms` — one
+/// implementation of what a warning looks like, not two.
+#[test]
+fn success_path_warnings_render_as_diagnostics() {
+    let d = workspace(true);
+    std::fs::write(
+        d.path().join("pnpm-workspace.yaml"),
+        "supportedArchitectures:\n  os: [linux, win32]\n  cpu: [x64]\n",
+    )
+    .unwrap();
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("pudu::init::win32_skipped"),
+        "the diagnostic code must be shown:\n{stderr}"
+    );
 }
