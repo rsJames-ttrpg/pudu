@@ -122,10 +122,26 @@ libc-declaring packages, in pudu's favour (survey §1).
 
 ```rust
 pub struct PlatformView {
-    /// Snapshot keys that survive on this platform, sorted.
+    /// Snapshot keys that survive on this platform.
     pub nodes: BTreeSet<String>,
-    /// Edges dropped because their target did not survive.
-    pub dropped_edges: Vec<DroppedEdge>,
+    /// Snapshot keys excluded on this platform. `nodes` and `pruned`
+    /// partition the graph; `pruned` is stored rather than recomputed
+    /// because §6 prints it on every run.
+    pub pruned: BTreeSet<String>,
+    /// Non-optional edges dropped because their target did not survive.
+    /// Optional edges dropped this way are the normal case (every
+    /// `@esbuild/*` on every platform but one) and are not retained.
+    pub dropped_required_edges: Vec<DroppedEdge>,
+}
+
+pub struct DroppedEdge {
+    /// Snapshot key of the package that declared the dependency.
+    pub dependent: String,
+    /// The `node_modules/` link name, which may differ from the target's
+    /// own name when the edge is an npm alias.
+    pub link_name: String,
+    /// Snapshot key of the excluded dependency.
+    pub target: String,
 }
 
 pub struct Matrix {
@@ -259,6 +275,11 @@ generated labels wholesale — including any abi label §5.2 would have added.
 `os` / `cpu` / `libc` continue to drive npm field matching unchanged; only
 emission is overridden. This is parent design §7's escape hatch, already
 parsed by S0's `Platform::constraints`.
+
+Unlike the generated labels of §5.1, an override is returned **in the order
+the user wrote it**. It is already deterministic, being read from a config
+file, and re-sorting would silently reorder the user's own list in the
+emitted `constraint_values`.
 
 An empty `constraints = []` is honoured as written — an explicit request for
 a platform with no constraint values — rather than treated as absent.
