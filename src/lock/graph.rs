@@ -122,12 +122,19 @@ enum Colour {
 /// rejects — see the S1 spec §7 for why that is safe under the single
 /// `filegroup` store.
 ///
+/// Each reported cycle is a *closed* path — the entry node is repeated at
+/// the end, per S1 spec §10, so a two-node cycle is `["a", "b", "a"]` and a
+/// self-edge is `["a", "a"]`. The closed form reads unambiguously as a walk
+/// back to its start, which matters because this is what `pudu debug
+/// print-graph` renders as a human diagnostic.
+///
 /// Deduplication: a cycle's identity is its node set, not the path text —
 /// the same cycle found from a different DFS start yields the same nodes in
 /// a rotated order, and would otherwise be reported once per entry point
-/// that can reach it. So the dedup key is the node set sorted into a fixed
-/// order (a `BTreeSet`), which is rotation-invariant; the reported cycle
-/// itself keeps its original discovery order.
+/// that can reach it. So the dedup key is the node set (a `BTreeSet`),
+/// which is rotation-invariant; the closing repeat of the entry node does
+/// not add anything to the set, so it does not affect dedup. The reported
+/// cycle itself keeps its original discovery order.
 fn find_cycles(nodes: &BTreeMap<String, Node>) -> Vec<Vec<String>> {
     let mut colour: BTreeMap<&str, Colour> =
         nodes.keys().map(|k| (k.as_str(), Colour::White)).collect();
@@ -160,10 +167,11 @@ fn find_cycles(nodes: &BTreeMap<String, Node>) -> Vec<Vec<String>> {
                             .iter()
                             .position(|n| *n == next)
                             .expect("a grey node is always on the current path");
-                        let cycle: Vec<String> =
+                        let mut cycle: Vec<String> =
                             path[pos..].iter().map(|s| s.to_string()).collect();
                         let key: std::collections::BTreeSet<String> =
                             cycle.iter().cloned().collect();
+                        cycle.push(next.to_string());
                         if seen.insert(key) {
                             cycles.push(cycle);
                         }
@@ -700,8 +708,15 @@ snapshots:
 "#,
         );
         assert_eq!(g.cycles.len(), 1, "one cycle: {:?}", g.cycles);
-        let c = &g.cycles[0];
-        assert!(c.contains(&"a@1.0.0".to_string()) && c.contains(&"b@1.0.0".to_string()));
+        // Closed path: the entry node repeats at the end (S1 spec §10).
+        assert_eq!(
+            g.cycles[0],
+            vec![
+                "a@1.0.0".to_string(),
+                "b@1.0.0".to_string(),
+                "a@1.0.0".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -718,6 +733,11 @@ snapshots:
 "#,
         );
         assert_eq!(g.cycles.len(), 1, "{:?}", g.cycles);
+        // Closed path of length one: the entry node repeats immediately.
+        assert_eq!(
+            g.cycles[0],
+            vec!["a@1.0.0".to_string(), "a@1.0.0".to_string()]
+        );
     }
 
     #[test]
@@ -783,14 +803,15 @@ snapshots:
         // would also satisfy the equality above. Pin down the actual content
         // so this test can't pass against such an implementation.
         assert_eq!(g1.cycles.len(), 1, "{:?}", g1.cycles);
-        let mut sorted = g1.cycles[0].clone();
-        sorted.sort();
+        // Closed path: first and last entries are the same (entry) node,
+        // and the interior is the full a-b-c cycle in exactly one order.
         assert_eq!(
-            sorted,
+            g1.cycles[0],
             vec![
                 "a@1.0.0".to_string(),
                 "b@1.0.0".to_string(),
                 "c@1.0.0".to_string(),
+                "a@1.0.0".to_string(),
             ]
         );
     }
@@ -816,5 +837,16 @@ snapshots:
 "#,
         );
         assert_eq!(g.cycles.len(), 1, "{:?}", g.cycles);
+        // Closed path, and the closing repeat of the entry node must not
+        // have caused the dedup key (a node set) to treat this as two
+        // cycles: the set {a, b} is unaffected by the trailing repeat.
+        assert_eq!(
+            g.cycles[0],
+            vec![
+                "a@1.0.0".to_string(),
+                "b@1.0.0".to_string(),
+                "a@1.0.0".to_string()
+            ]
+        );
     }
 }
