@@ -4,9 +4,16 @@
 //! Run explicitly:
 //!
 //! ```sh
-//! cd tests/fixtures/platform && npm install @pnpm/package-is-installable && cd -
+//! cd tests/fixtures/platform && npm install @pnpm/package-is-installable@1000.0.21 && cd -
 //! cargo test --test platform_fuzz -- --ignored --nocapture
 //! ```
+//!
+//! The version is pinned exactly, not range-matched: `reference.mjs` reaches
+//! into this package's internal `lib/*.js` by filesystem path, bypassing its
+//! `exports` map (TD-S2-04). That is low-risk for a developer script nothing
+//! else depends on, but this file is now also what CI runs, so an upstream
+//! layout change must not silently start failing builds — bump the pin
+//! deliberately instead.
 //!
 //! This is where `libc` and negation coverage comes from. No install against
 //! the public npm registry can produce a lockfile carrying a `libc` field —

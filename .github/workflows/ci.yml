@@ -49,3 +49,22 @@ jobs:
         run: cargo build --all-targets
       - name: cargo test
         run: cargo test --all-targets
+
+  platform-fuzz:
+    name: platform fuzz (differential vs pnpm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: install the reference module
+        # Pinned exactly: reference.mjs reaches into this package's internal
+        # lib/*.js by filesystem path, bypassing its `exports` map
+        # (TD-S2-04). That layout could move in any release.
+        run: npm install --no-save @pnpm/package-is-installable@1000.0.21
+        working-directory: tests/fixtures/platform
+      - name: cargo test (ignored differential fuzz)
+        run: cargo test --test platform_fuzz -- --ignored --nocapture

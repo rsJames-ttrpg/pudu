@@ -27,6 +27,25 @@ const mainEntry = require.resolve('@pnpm/package-is-installable');
 const checkPlatformPath = path.join(path.dirname(mainEntry), 'checkPlatform.js');
 const { checkPlatform } = await import(checkPlatformPath);
 
+// TD-S2-05: pnpm reads the host's libc once at module load, via
+// `detect-libc`. On a host it cannot classify (`unknown` — macOS, at time
+// of writing) it skips the libc axis entirely: `checkPlatform` never rejects
+// on `libc` there, no matter what the case asks for. Left unguarded, that
+// makes roughly a third of the corpus (every libc case) disagree, which
+// reads as "`admits` is broken" rather than "run this on Linux". Fail loudly
+// instead of producing a wall of misleading disagreements.
+const { familySync } = await import('detect-libc');
+const hostLibc = familySync() ?? 'unknown';
+if (hostLibc === 'unknown') {
+  process.stderr.write(
+    "reference.mjs: this host's libc is not detectable (detect-libc reports " +
+      "'unknown', e.g. macOS). pnpm skips the libc axis entirely on such a host, " +
+      'so every libc case below would appear to disagree with pudu even though ' +
+      "pudu is correct. Run this on a Linux host instead.\n"
+  );
+  process.exit(1);
+}
+
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 const out = [];
 for await (const line of rl) {
