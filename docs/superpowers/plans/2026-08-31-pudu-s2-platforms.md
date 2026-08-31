@@ -513,7 +513,11 @@ Append to the `mod tests` block at the end of `src/error.rs`:
         let msg = w.to_string();
         assert!(msg.contains("@esbuild/aix-ppc64@0.25.12"), "{msg}");
         assert!(msg.contains("@esbuild/sunos-x64@0.25.12"), "{msg}");
-        assert!(msg.contains('2'), "states how many: {msg}");
+        assert!(msg.contains("2 package(s)"), "states how many: {msg}");
+        // (Not `msg.contains('2')`: the fixture package versions are
+        // `0.25.12`, which already contain the digit `2`, so that
+        // assertion would pass even if the count were dropped from the
+        // message entirely.)
     }
 
     #[test]
@@ -1256,8 +1260,19 @@ mod tests {
             ("linux-x64".to_string(), p(Os::Linux, Cpu::X64, None)),
             ("linux-x64-musl".to_string(), p(Os::Linux, Cpu::X64, Some(Libc::Musl))),
         ]);
+        // The no-libc platform should never gain an abi constraint
         let labels = constraint_labels(&all["linux-x64"], &all);
         assert!(!labels.iter().any(|l| l.contains("abi")), "{labels:?}");
+        // The musl platform should also not gain an abi constraint when paired with a no-libc platform,
+        // because a no-libc platform is not specifying a libc and should not be considered discriminating.
+        // (This second assertion is load-bearing: `abi_discriminates` short-circuits on
+        // `platform.libc.is_none()`, so the first assertion alone is invariant to how `other.libc`
+        // is compared — see Step 5, mutation 3.)
+        let labels = constraint_labels(&all["linux-x64-musl"], &all);
+        assert!(
+            !labels.iter().any(|l| l.contains("abi")),
+            "no-libc platform should not discriminate: {labels:?}"
+        );
     }
 
     #[test]
@@ -1425,8 +1440,15 @@ Expected: PASS, 10 tests.
 2. Make `abi_discriminates` return `platform.libc.is_some()` →
    `glibc_only_configuration_emits_no_abi_constraint` must fail.
 3. Change `other.libc.is_some_and(|l| l != libc)` to `other.libc != Some(libc)`
-   → `a_platform_with_no_libc_never_gains_an_abi_constraint` must fail (the
-   `linux-x64` entry would start discriminating `linux-x64-musl`).
+   → does **not** redden `a_platform_with_no_libc_never_gains_an_abi_constraint`
+   as originally assumed here: `abi_discriminates` short-circuits on
+   `platform.libc.is_none()`, so the assertion for the no-libc `linux-x64`
+   entry is invariant to this mutation regardless of how `other.libc` is
+   compared. The shipped test adds a second assertion, on the sibling
+   `linux-x64-musl` platform: under the mutation, `linux-x64`'s `None` libc
+   satisfies `other.libc != Some(libc)` against `linux-x64-musl`'s `Some(Musl)`,
+   so `linux-x64-musl` wrongly gains an abi constraint from a platform that
+   never specified one — and that second assertion is what reddens.
 4. Sort the override before returning →
    `constraints_override_replaces_generated_labels_entirely` must fail.
 

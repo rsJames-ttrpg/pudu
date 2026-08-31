@@ -426,6 +426,32 @@ pub enum DeriveWarning {
     #[error("pnpm-workspace.yaml: ignoring unknown libc `{value}`")]
     #[diagnostic(severity(Warning), code(pudu::init::unknown_libc))]
     UnknownLibc { value: String },
+
+    #[error(
+        "pnpm-workspace.yaml: supportedArchitectures.{key} must be a list, e.g. `{key}: [{example}]`"
+    )]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::init::axis_not_a_sequence),
+        help("a bare value is ignored; wrap it in brackets to make it a one-entry list")
+    )]
+    AxisNotASequence { key: String, example: String },
+
+    #[error("pnpm-workspace.yaml: supportedArchitectures must be a mapping of os/cpu/libc lists")]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::init::supported_architectures_not_a_mapping),
+        help("the block is ignored; see https://pnpm.io/settings#supportedarchitectures")
+    )]
+    SupportedArchitecturesNotAMapping,
+
+    #[error("pnpm-workspace.yaml: ignoring non-string entry in supportedArchitectures.{key}")]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::init::non_string_axis_entry),
+        help("every entry must be a quoted or bare string, e.g. `cpu: [x64, arm64]`")
+    )]
+    NonStringAxisEntry { key: String },
 }
 
 /// Failures of `pudu init`'s `supportedArchitectures` expansion.

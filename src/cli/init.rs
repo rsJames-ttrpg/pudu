@@ -74,21 +74,66 @@ fn host_cpu() -> Cpu {
 }
 
 /// Read a `supportedArchitectures` axis into a list of strings.
-fn axis(v: &serde_norway::Value, key: &str) -> Vec<String> {
-    v.get(key)
-        .and_then(|x| x.as_sequence())
-        .map(|s| {
-            s.iter()
-                .filter_map(|i| i.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+///
+/// Reports rather than silently discarding: a bare scalar
+/// (`os: linux` instead of `os: [linux]`) and a non-string entry
+/// (`cpu: [123]`) were both dropped in silence before, so a typo cost the
+/// user their whole intent with no diagnostic (TD-S0-08, TD-S0-09).
+fn axis(v: &serde_norway::Value, key: &str, warnings: &mut Vec<DeriveWarning>) -> Vec<String> {
+    let Some(entry) = v.get(key) else {
+        return Vec::new();
+    };
+
+    let Some(seq) = entry.as_sequence() else {
+        warnings.push(DeriveWarning::AxisNotASequence {
+            key: key.to_string(),
+            example: match key {
+                "os" => "linux",
+                "cpu" => "x64",
+                _ => "glibc",
+            }
+            .to_string(),
+        });
+        return Vec::new();
+    };
+
+    let mut out = Vec::with_capacity(seq.len());
+    let mut reported = false;
+    for item in seq {
+        match item.as_str() {
+            Some(s) => out.push(s.to_string()),
+            None if !reported => {
+                // Report once per axis: a list of ten bad entries is one
+                // mistake, not ten.
+                reported = true;
+                warnings.push(DeriveWarning::NonStringAxisEntry {
+                    key: key.to_string(),
+                });
+            }
+            None => {}
+        }
+    }
+    out
 }
 
 /// Whether an axis key was present in the yaml at all (as opposed to
 /// absent, which falls back to the host value).
 fn axis_present(v: &serde_norway::Value, key: &str) -> bool {
     v.get(key).is_some()
+}
+
+/// Whether an axis key was present **and shaped as a sequence**.
+///
+/// A bare scalar (`os: linux`) is reported by [`axis`] via
+/// [`DeriveWarning::AxisNotASequence`] and, like an absent key, must fall
+/// back to the host/default value rather than surface as
+/// `NoUsablePlatforms` — the user's intent already got a diagnostic, so
+/// treating the malformed axis as "user specified nothing usable" would be
+/// a second, more confusing failure for the same mistake. A syntactically
+/// valid sequence that filters down to nothing (e.g. `os: [win32]`) is a
+/// different case and still errors.
+fn axis_is_a_sequence(v: &serde_norway::Value, key: &str) -> bool {
+    v.get(key).is_none_or(|entry| entry.as_sequence().is_some())
 }
 
 /// Expand `supportedArchitectures` into a platform matrix, or return the
@@ -124,10 +169,12 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
                 warnings.push(DeriveWarning::UnknownKey { key: k.to_string() });
             }
         }
+    } else {
+        warnings.push(DeriveWarning::SupportedArchitecturesNotAMapping);
     }
 
     let mut oses = Vec::new();
-    for raw in axis(&sa, "os") {
+    for raw in axis(&sa, "os", &mut warnings) {
         match raw.as_str() {
             "current" => oses.push(host_os()),
             "linux" => oses.push(Os::Linux),
@@ -140,7 +187,7 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
     }
 
     let mut cpus = Vec::new();
-    for raw in axis(&sa, "cpu") {
+    for raw in axis(&sa, "cpu", &mut warnings) {
         match raw.as_str() {
             "current" => cpus.push(host_cpu()),
             "x64" => cpus.push(Cpu::X64),
@@ -152,7 +199,7 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
     }
 
     let mut libcs = Vec::new();
-    for raw in axis(&sa, "libc") {
+    for raw in axis(&sa, "libc", &mut warnings) {
         match raw.as_str() {
             "current" | "glibc" => libcs.push(Libc::Glibc),
             "musl" => libcs.push(Libc::Musl),
@@ -163,17 +210,18 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
     }
 
     // Only fall back to the host/default when the axis key was absent
-    // entirely. When the key was present but every entry was filtered out
-    // (e.g. `os: [win32]`), the axis stays empty so the cross-product below
-    // yields no platforms and this surfaces as an error rather than
-    // silently substituting the host.
-    if oses.is_empty() && !axis_present(&sa, "os") {
+    // entirely, or malformed (not a sequence — already reported above).
+    // When the key was present as a valid sequence but every entry was
+    // filtered out (e.g. `os: [win32]`), the axis stays empty so the
+    // cross-product below yields no platforms and this surfaces as an
+    // error rather than silently substituting the host.
+    if oses.is_empty() && !(axis_present(&sa, "os") && axis_is_a_sequence(&sa, "os")) {
         oses.push(host_os());
     }
-    if cpus.is_empty() && !axis_present(&sa, "cpu") {
+    if cpus.is_empty() && !(axis_present(&sa, "cpu") && axis_is_a_sequence(&sa, "cpu")) {
         cpus.push(host_cpu());
     }
-    if libcs.is_empty() && !axis_present(&sa, "libc") {
+    if libcs.is_empty() && !(axis_present(&sa, "libc") && axis_is_a_sequence(&sa, "libc")) {
         libcs.push(Libc::Glibc);
     }
 
@@ -765,5 +813,67 @@ mod tests {
     fn absent_supported_architectures_uses_defaults() {
         let d = derive_platforms(Some("packages:\n  - packages/*\n")).unwrap();
         assert_eq!(d.platforms.len(), 3);
+    }
+
+    /// TD-S0-08: `os: linux` (a bare scalar, not a sequence) is a plausible
+    /// typo. It must say so, not fail elsewhere with a misleading message.
+    #[test]
+    fn a_non_sequence_axis_warns_naming_the_axis() {
+        let yaml = "supportedArchitectures:\n  os: linux\n  cpu: [x64]\n";
+        let d = derive_platforms(Some(yaml)).expect("must not be fatal");
+        assert!(
+            d.warnings.iter().any(|w| matches!(
+                w,
+                DeriveWarning::AxisNotASequence { key, .. } if key == "os"
+            )),
+            "warnings: {:?}",
+            d.warnings
+        );
+    }
+
+    /// TD-S0-08: a non-mapping `supportedArchitectures` was ignored in
+    /// silence, which is the worst outcome — the user's intent vanishes.
+    #[test]
+    fn a_non_mapping_supported_architectures_warns() {
+        let yaml = "supportedArchitectures: linux\n";
+        let d = derive_platforms(Some(yaml)).expect("must not be fatal");
+        assert!(
+            d.warnings
+                .iter()
+                .any(|w| matches!(w, DeriveWarning::SupportedArchitecturesNotAMapping)),
+            "warnings: {:?}",
+            d.warnings
+        );
+    }
+
+    /// TD-S0-09: a non-string entry was dropped in silence.
+    #[test]
+    fn a_non_string_axis_entry_warns_rather_than_vanishing() {
+        let yaml = "supportedArchitectures:\n  os: [linux]\n  cpu: [123, x64]\n";
+        let d = derive_platforms(Some(yaml)).expect("must not be fatal");
+        assert!(
+            d.warnings.iter().any(|w| matches!(
+                w,
+                DeriveWarning::NonStringAxisEntry { key, .. } if key == "cpu"
+            )),
+            "warnings: {:?}",
+            d.warnings
+        );
+    }
+
+    /// TD-S0-09: the unknown-`cpu` arm had no test at all. `os` and `libc`
+    /// were already covered; this closes the gap.
+    #[test]
+    fn an_unknown_cpu_value_warns() {
+        let yaml = "supportedArchitectures:\n  os: [linux]\n  cpu: [ppc64, x64]\n";
+        let d = derive_platforms(Some(yaml)).expect("must not be fatal");
+        assert!(
+            d.warnings.iter().any(|w| matches!(
+                w,
+                DeriveWarning::UnknownCpu { value } if value == "ppc64"
+            )),
+            "warnings: {:?}",
+            d.warnings
+        );
     }
 }
