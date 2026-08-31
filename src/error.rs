@@ -46,6 +46,10 @@ pub enum ExitCode {
     InputInvalid = 3,
     /// The verb is registered but not implemented yet.
     Unimplemented = 4,
+    /// `pudu vendor --check` found `pudu.lock` out of date. Distinct from
+    /// `InputInvalid` so CI can tell "regenerate the sidecar" from "your
+    /// config is wrong" without parsing the message.
+    Stale = 5,
 }
 
 impl ExitCode {
@@ -415,6 +419,194 @@ fn capped_list(items: &[String], cap: usize) -> String {
     }
 }
 
+// --- Vendor (S3) ----------------------------------------------------------
+
+/// Failures of `pudu vendor`.
+#[derive(Debug, Error, Diagnostic)]
+pub enum VendorError {
+    #[error("pudu.lock is out of date ({} difference(s))", differences.len())]
+    #[diagnostic(
+        severity(Error),
+        code(pudu::vendor::stale),
+        help("run `pudu vendor` to regenerate it, and commit the result")
+    )]
+    Stale { differences: Vec<String> },
+
+    #[error(
+        "{} package(s) use a dependency source pudu cannot verify: {}",
+        packages.len(),
+        capped_list(packages, 10)
+    )]
+    #[diagnostic(
+        code(pudu::vendor::unsupported_resolution),
+        help(
+            "pudu vendors registry tarballs, which carry an integrity hash it can check. git and URL dependencies carry none, so their bytes cannot be verified. See the roadmap for when they land."
+        )
+    )]
+    UnsupportedResolution { packages: Vec<String> },
+
+    #[error("{key}: tarball does not match the integrity recorded in pnpm-lock.yaml")]
+    #[diagnostic(
+        code(pudu::vendor::integrity_mismatch),
+        help(
+            "the registry served different bytes than pnpm recorded. Do not ignore this: it means the tarball changed after your lockfile was written."
+        )
+    )]
+    IntegrityMismatch {
+        key: String,
+        url: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("{key}: {reason}")]
+    #[diagnostic(
+        code(pudu::vendor::malformed_tarball),
+        help(
+            "npm tarballs nest every entry under `package/`; pudu emits `strip_prefix = \"package\"`, so an archive shaped otherwise would fail at build time instead"
+        )
+    )]
+    MalformedTarball { key: String, reason: String },
+
+    #[error("{key}: tarball contains no package/package.json")]
+    #[diagnostic(code(pudu::vendor::missing_package_json))]
+    MissingPackageJson { key: String },
+
+    #[error("{key}: cannot read integrity `{integrity}`")]
+    #[diagnostic(
+        code(pudu::vendor::malformed_integrity),
+        help("pudu understands `sha512-<base64>`, which is what npm publishes")
+    )]
+    MalformedIntegrity { key: String, integrity: String },
+
+    #[error("{key}: derived tarball URL is not a valid URL: {url}")]
+    #[diagnostic(
+        code(pudu::vendor::bad_derived_url),
+        help("check the `[registry]` entry this package resolves to")
+    )]
+    BadDerivedUrl {
+        key: String,
+        name: String,
+        url: String,
+    },
+
+    #[error("cannot read {path}")]
+    #[diagnostic(
+        code(pudu::vendor::sidecar_malformed),
+        help("pudu.lock is generated; delete it and run `pudu vendor` to rebuild it")
+    )]
+    SidecarMalformed { path: PathBuf, reason: String },
+
+    #[error("no platforms configured, so there is nothing to vendor")]
+    #[diagnostic(
+        code(pudu::vendor::no_platforms),
+        help("add at least one `[platforms.<name>]` table to pudu.toml")
+    )]
+    NoPlatformsConfigured,
+
+    #[error("{key}: not in the cache and --no-network was given")]
+    #[diagnostic(
+        code(pudu::vendor::network_disabled),
+        help("run `pudu vendor` once without --no-network to warm the cache")
+    )]
+    NetworkDisabled { key: String, url: String },
+
+    #[error("{key}: {url} returned HTTP {status}")]
+    #[diagnostic(
+        code(pudu::vendor::http_status),
+        help("{}", http_help(*status))
+    )]
+    HttpStatus {
+        key: String,
+        url: String,
+        status: u16,
+    },
+
+    #[error("{key}: cannot fetch {url}")]
+    #[diagnostic(code(pudu::vendor::transport))]
+    Transport {
+        key: String,
+        url: String,
+        #[source]
+        source: ureq::Error,
+    },
+
+    #[error("no cache directory available")]
+    #[diagnostic(
+        code(pudu::vendor::cache_unavailable),
+        help("set PUDU_CACHE_DIR to a writable directory")
+    )]
+    CacheUnavailable,
+}
+
+/// Help text for an HTTP failure. 401 and 403 get their own wording because
+/// a private registry is the most likely first encounter with either, and
+/// "authentication is not implemented" is the answer the user needs.
+fn http_help(status: u16) -> String {
+    match status {
+        401 | 403 => "pudu sends no credentials — authentication is not implemented yet. A registry requiring a token cannot be vendored from.".to_string(),
+        404 => "the package may have been unpublished, or the `[registry]` host may be wrong for it".to_string(),
+        _ => "the registry rejected the request; pudu already retried transient failures".to_string(),
+    }
+}
+
+impl VendorError {
+    pub fn exit_code(&self) -> ExitCode {
+        match self {
+            VendorError::Stale { .. } => ExitCode::Stale,
+            // A registry that is down or refusing is not the user's input
+            // being invalid, so it stays unclassified rather than claiming
+            // pudu.toml or the lockfile is at fault.
+            VendorError::HttpStatus { .. } | VendorError::Transport { .. } => ExitCode::Internal,
+            _ => ExitCode::InputInvalid,
+        }
+    }
+}
+
+/// Non-fatal findings from inspecting a tarball.
+///
+/// Every one of these is a property of somebody's published package rather
+/// than of pudu's input being malformed, and none makes the rest of the
+/// sidecar wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
+pub enum VendorWarning {
+    #[error(
+        "{key}: pnpm-lock.yaml says hasBin: {lockfile}, but the tarball yields {found} command(s)"
+    )]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::vendor::has_bin_disagreement),
+        help(
+            "pudu records what the tarball contains; `hasBin` is a flag pnpm derives from registry metadata"
+        )
+    )]
+    HasBinDisagreement {
+        key: String,
+        lockfile: bool,
+        found: usize,
+    },
+
+    #[error("{key}: dropping bin `{name}` — the name is not URL-safe")]
+    #[diagnostic(severity(Warning), code(pudu::vendor::bin_name_rejected))]
+    BinNameRejected { key: String, name: String },
+
+    #[error("{key}: dropping bin `{name}` — its path `{path}` escapes the package")]
+    #[diagnostic(severity(Warning), code(pudu::vendor::bin_path_escapes))]
+    BinPathEscapes {
+        key: String,
+        name: String,
+        path: String,
+    },
+
+    #[error("{key}: two bins named `{name}`; keeping the last")]
+    #[diagnostic(severity(Warning), code(pudu::vendor::bin_name_collision))]
+    BinNameCollision { key: String, name: String },
+
+    #[error("{key}: dropping bin `{name}` — its value is not a string")]
+    #[diagnostic(severity(Warning), code(pudu::vendor::non_string_bin_value))]
+    NonStringBinValue { key: String, name: String },
+}
+
 // --- Platform derivation (pudu init) -------------------------------------
 
 /// Non-fatal findings from `pudu init`'s `supportedArchitectures` expansion.
@@ -669,6 +861,7 @@ typed_errors! {
     ConfigError => |_| ExitCode::InputInvalid,
     DeriveError => |_| ExitCode::InputInvalid,
     LockError => |_| ExitCode::InputInvalid,
+    VendorError => VendorError::exit_code,
 }
 
 /// The exit code an `anyhow` error from the CLI boundary maps to.
@@ -804,7 +997,7 @@ mod tests {
 
     #[test]
     fn exit_codes_are_classified() {
-        let cases: [(anyhow::Error, ExitCode); 5] = [
+        let cases: [(anyhow::Error, ExitCode); 8] = [
             (
                 CliError::Unimplemented {
                     verb: "vendor".into(),
@@ -830,6 +1023,24 @@ mod tests {
             ),
             (ConfigError::NoPlatforms.into(), ExitCode::InputInvalid),
             (anyhow::anyhow!("disk on fire"), ExitCode::Internal),
+            (
+                anyhow::Error::from(VendorError::Stale {
+                    differences: vec!["pudu.lock has no entry for `left-pad@1.3.0`".to_string()],
+                }),
+                ExitCode::Stale,
+            ),
+            (
+                anyhow::Error::from(VendorError::NoPlatformsConfigured),
+                ExitCode::InputInvalid,
+            ),
+            (
+                anyhow::Error::from(VendorError::HttpStatus {
+                    key: "left-pad@1.3.0".to_string(),
+                    url: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".to_string(),
+                    status: 503,
+                }),
+                ExitCode::Internal,
+            ),
         ];
         for (err, want) in cases {
             assert_eq!(exit_code(&err), want, "{err:#}");
@@ -867,6 +1078,11 @@ mod tests {
             (
                 "LockError",
                 LockError::PatchedDependencies.into(),
+                ExitCode::InputInvalid,
+            ),
+            (
+                "VendorError",
+                VendorError::NoPlatformsConfigured.into(),
                 ExitCode::InputInvalid,
             ),
         ]
