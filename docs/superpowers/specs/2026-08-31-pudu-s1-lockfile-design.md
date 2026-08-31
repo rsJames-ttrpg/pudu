@@ -380,6 +380,14 @@ the virtual store is a single `filegroup` mapping paths to tarball artifacts
 dependencies' targets. The cycle lives in symlink data inside one target, not
 in the Buck target graph.
 
+**Detection is deliberately incomplete.** The scan reports one cycle per DFS
+back edge, not an exhaustive enumeration of simple cycles: a cycle reachable
+only through a cross edge into an already-finished node is never discovered.
+Given `a->p->x->a` and `a->b->c->x`, only `a-p-x-a` is reported. This is
+acceptable because `cycles` is a human-facing diagnostic and never an input to
+a correctness decision — but **no later stage may assume the list is
+complete**. Exhaustive enumeration would need Johnson's algorithm.
+
 **Constraint this places on S4:** the store must not be decomposed into one
 Buck target per package depending on its dependencies' targets — that shape
 reintroduces the cycle as a Buck target cycle and fails to load. A split for

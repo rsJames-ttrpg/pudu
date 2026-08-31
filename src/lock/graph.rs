@@ -135,6 +135,18 @@ enum Colour {
 /// which is rotation-invariant; the closing repeat of the entry node does
 /// not add anything to the set, so it does not affect dedup. The reported
 /// cycle itself keeps its original discovery order.
+///
+/// **This is not an exhaustive enumeration of simple cycles.** The scan
+/// reports one cycle per DFS back edge, so a cycle reachable only through a
+/// cross edge into an already-finished (black) node is never discovered. For
+/// example, given `a->p->x->a` and `a->b->c->x`, only `a-p-x-a` is reported;
+/// the equally real `a-b-c-x-a` is not, because the `c->x` cross edge lands
+/// on a black node and is skipped.
+///
+/// That is acceptable because `cycles` is a human-facing diagnostic in
+/// `pudu debug print-graph` and never an input to a correctness decision.
+/// **Do not build a later stage on the assumption that this list is
+/// complete** — that would need Johnson's algorithm, not a colour DFS.
 fn find_cycles(nodes: &BTreeMap<String, Node>) -> Vec<Vec<String>> {
     let mut colour: BTreeMap<&str, Colour> =
         nodes.keys().map(|k| (k.as_str(), Colour::White)).collect();
