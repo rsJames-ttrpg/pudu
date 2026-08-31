@@ -384,7 +384,7 @@ pub enum PlatformWarning {
         "{} package(s) are excluded on every configured platform ({}): {}",
         packages.len(),
         platforms.join(", "),
-        packages.join(", ")
+        capped_list(packages, 10)
     )]
     #[diagnostic(
         severity(Warning),
@@ -397,6 +397,22 @@ pub enum PlatformWarning {
         packages: Vec<String>,
         platforms: Vec<String>,
     },
+}
+
+/// Render a name list as a comma-separated paragraph, capped so a large
+/// aggregate (the real fixture has 78 names) stays readable. The count
+/// still comes from the caller (e.g. `packages.len()`), so it is always
+/// exact even when the inline list is truncated.
+fn capped_list(items: &[String], cap: usize) -> String {
+    if items.len() <= cap {
+        items.join(", ")
+    } else {
+        format!(
+            "{}, …and {} more",
+            items[..cap].join(", "),
+            items.len() - cap
+        )
+    }
 }
 
 // --- Platform derivation (pudu init) -------------------------------------
@@ -921,6 +937,27 @@ mod tests {
         assert!(msg.contains("@esbuild/aix-ppc64@0.25.12"), "{msg}");
         assert!(msg.contains("@esbuild/sunos-x64@0.25.12"), "{msg}");
         assert!(msg.contains("2 package(s)"), "states how many: {msg}");
+    }
+
+    /// On the real fixture this renders 78 package names as one unwrapped
+    /// paragraph, which is unreadable. Cap the inline list at 10, still
+    /// stating the full count.
+    #[test]
+    fn excluded_everywhere_caps_the_inline_list_but_keeps_the_full_count() {
+        let packages: Vec<String> = (0..15).map(|i| format!("pkg-{i}@1.0.0")).collect();
+        let w = PlatformWarning::ExcludedEverywhere {
+            packages: packages.clone(),
+            platforms: vec!["linux-x64-gnu".into()],
+        };
+        let msg = w.to_string();
+        assert!(msg.contains("15 package(s)"), "full count: {msg}");
+        for p in &packages[..10] {
+            assert!(msg.contains(p.as_str()), "first 10 listed: {msg}");
+        }
+        for p in &packages[10..] {
+            assert!(!msg.contains(p.as_str()), "not listed past the cap: {msg}");
+        }
+        assert!(msg.contains("…and 5 more"), "{msg}");
     }
 
     #[test]

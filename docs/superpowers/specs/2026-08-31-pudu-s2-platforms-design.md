@@ -331,6 +331,12 @@ invented, so all are snake_case.
 
 Two runs on identical inputs must produce byte-identical stdout.
 
+The `debug` commands deliberately skip `Config::validate` — they load
+`pudu.toml` and the lockfile directly, not through the path `config check`
+uses. This is a scaffolding convenience, not a guarantee: an invalid config
+(e.g. an empty `[platforms]`) can reach pruning here. S4 should not inherit
+this assumption silently if it builds on `debug`'s load path.
+
 ---
 
 ## 7. What S2 does not model

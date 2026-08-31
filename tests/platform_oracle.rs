@@ -108,13 +108,17 @@ fn reproduces_pnpm_on_darwin_arm64() {
 /// The oracles must stay pinned to S1's fixture: `linux-x64-gnu` is the
 /// platform the committed virtual-store listing was captured on, so the two
 /// files must agree or one of them is stale.
+///
+/// Spec §9.2 says byte-identical, not "same set of lines" — the two files
+/// genuinely are byte-identical on this fixture, so comparing `BTreeSet`s
+/// (as an earlier version of this test did) is a strength gap: it would let
+/// a duplicated or reordered line slip through silently.
 #[test]
 fn linux_x64_gnu_oracle_matches_the_s1_virtual_store_listing() {
-    let listing: BTreeSet<String> = read("virtual-store-listing.txt")
-        .lines()
-        .map(str::to_string)
-        .collect();
-    assert_eq!(oracle("linux-x64-gnu"), listing);
+    assert_eq!(
+        read("oracle/linux-x64-gnu.txt"),
+        read("virtual-store-listing.txt")
+    );
 }
 
 /// The roadmap's demo criterion: each configured platform resolves
@@ -125,6 +129,10 @@ fn each_platform_keeps_exactly_one_esbuild_binary_per_version() {
         (
             "linux-x64-gnu",
             platform(Os::Linux, Cpu::X64, Some(Libc::Glibc)),
+        ),
+        (
+            "linux-x64-musl",
+            platform(Os::Linux, Cpu::X64, Some(Libc::Musl)),
         ),
         (
             "linux-arm64-gnu",
