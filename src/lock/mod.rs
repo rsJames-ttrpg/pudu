@@ -1,5 +1,6 @@
 //! Reading `pnpm-lock.yaml` v9.
 
+pub mod graph;
 pub mod snapshot_key;
 pub mod types;
 
@@ -8,6 +9,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::error::{LockError, LockWarning};
+pub use graph::{Edge, EdgeKind, Graph, Node, Root, RootKind};
 pub use snapshot_key::SnapshotKey;
 pub use types::*;
 
