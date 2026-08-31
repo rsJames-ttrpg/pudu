@@ -112,18 +112,28 @@ pub struct PeerMeta {
 /// How a package's bytes are obtained. The variant is chosen by which key is
 /// present; an unrecognised shape fails to deserialize.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-// Untagged: serde tries each variant and picks the one that fits, so the
-// variant is chosen by which key is present. `deny_unknown_fields` is
-// deliberately absent — it is not meaningful on an untagged enum, and
-// tolerating extra keys matches the rest of these types. A map matching no
-// variant (`{mystery: 1}`) still fails, which is the behaviour wanted.
+// Untagged: serde tries each variant in declaration order and picks the
+// first one that fits, ignoring extra keys — so the variant is chosen by
+// which key is present *and* by ordering. `Tarball` must come before
+// `Integrity`: a private-registry resolution is written as
+// `{integrity: sha512-…, tarball: https://…}`, and if `Integrity` were tried
+// first it would match on `integrity` alone and silently discard `tarball`
+// (S3 fetches from that field, so the failure mode is "vendor silently pulls
+// from the public registry"). With `Tarball` first, `{integrity: x}` alone
+// still falls through to `Integrity` because `Tarball` requires `tarball`.
+// `deny_unknown_fields` is deliberately absent — it is not meaningful on an
+// untagged enum, and tolerating extra keys matches the rest of these types.
+// A map matching no variant (`{mystery: 1}`) still fails, which is the
+// behaviour wanted.
 #[serde(untagged)]
 pub enum Resolution {
-    Integrity {
-        integrity: String,
-    },
     Tarball {
         tarball: String,
+        #[serde(default)]
+        integrity: Option<String>,
+    },
+    Integrity {
+        integrity: String,
     },
     Git {
         repo: String,
@@ -170,12 +180,51 @@ mod tests {
 
     #[test]
     fn each_resolution_variant_deserializes() {
+        // {integrity: x} -> Integrity (Tarball is tried first, lacks the
+        // required `tarball` key, falls through).
         let i: PackageMeta =
             serde_norway::from_str("resolution: {integrity: sha512-abc}\n").unwrap();
         assert!(matches!(i.resolution, Resolution::Integrity { .. }));
+
+        // {tarball: u} -> Tarball { integrity: None }
         let t: PackageMeta =
             serde_norway::from_str("resolution: {tarball: https://x/y.tgz}\n").unwrap();
-        assert!(matches!(t.resolution, Resolution::Tarball { .. }));
+        match t.resolution {
+            Resolution::Tarball { tarball, integrity } => {
+                assert_eq!(tarball, "https://x/y.tgz");
+                assert_eq!(integrity, None);
+            }
+            other => panic!("expected Tarball, got {other:?}"),
+        }
+
+        // {integrity: x, tarball: u} -> Tarball { integrity: Some(x) } — both
+        // retained. This is the private-registry shape from FIX 1: previously
+        // the tarball URL vanished silently.
+        let both: PackageMeta = serde_norway::from_str(
+            "resolution: {integrity: sha512-abc, tarball: https://x/y.tgz}\n",
+        )
+        .unwrap();
+        match both.resolution {
+            Resolution::Tarball { tarball, integrity } => {
+                assert_eq!(tarball, "https://x/y.tgz");
+                assert_eq!(integrity, Some("sha512-abc".to_string()));
+            }
+            other => panic!("expected Tarball with integrity retained, got {other:?}"),
+        }
+
+        // {repo, commit} -> Git
+        let g: PackageMeta =
+            serde_norway::from_str("resolution: {repo: https://x/y.git, commit: abc123}\n")
+                .unwrap();
+        match g.resolution {
+            Resolution::Git { repo, commit } => {
+                assert_eq!(repo, "https://x/y.git");
+                assert_eq!(commit, "abc123");
+            }
+            other => panic!("expected Git, got {other:?}"),
+        }
+
+        // {directory, type} -> Directory
         let d: PackageMeta =
             serde_norway::from_str("resolution: {directory: ../lib, type: directory}\n").unwrap();
         assert!(matches!(d.resolution, Resolution::Directory { .. }));
