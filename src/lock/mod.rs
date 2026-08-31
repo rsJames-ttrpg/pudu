@@ -79,10 +79,13 @@ pub fn parse_lockfile(text: &str, path: &Path) -> Result<(Lockfile, Vec<LockWarn
         return Err(LockError::UnsupportedVersion { found });
     }
 
+    // An absent key and every spelling of an explicit null (`~`, `null`, a
+    // bare `patchedDependencies:`) all deserialize to `None`, so only a
+    // present-and-non-empty mapping can reach the error.
     if probe
         .patched_dependencies
         .as_ref()
-        .is_some_and(|v| !matches!(v, serde_norway::Value::Null) && !is_empty_mapping(v))
+        .is_some_and(|v| !is_empty_mapping(v))
     {
         return Err(LockError::PatchedDependencies);
     }
