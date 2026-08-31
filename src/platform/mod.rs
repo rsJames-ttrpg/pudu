@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod matching;
+pub mod prune;
 
 pub use matching::{admits, admits_platform};
 
