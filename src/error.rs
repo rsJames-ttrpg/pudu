@@ -250,6 +250,107 @@ pub enum ConfigWarning {
     UnpinnedFixupRegistry,
 }
 
+// --- Lockfile errors -------------------------------------------------------
+
+/// Lockfile parse and graph-construction failures.
+///
+/// A malformed lockfile is an *input* error, like a malformed `pudu.toml` —
+/// both are files the user hands pudu, so both exit 3.
+#[derive(Debug, Error, Diagnostic)]
+pub enum LockError {
+    #[error(
+        "unsupported lockfileVersion: {} (pudu supports 9.0)",
+        .found.as_deref().unwrap_or("absent")
+    )]
+    #[diagnostic(
+        code(pudu::lock::unsupported_version),
+        help(
+            "pudu supports lockfileVersion 9.0. Run `pnpm install` with pnpm 9 or newer to upgrade this lockfile."
+        )
+    )]
+    UnsupportedVersion { found: Option<String> },
+
+    #[error("could not parse {path}")]
+    #[diagnostic(code(pudu::lock::yaml))]
+    Yaml {
+        path: PathBuf,
+        #[source]
+        source: serde_norway::Error,
+    },
+
+    #[error("invalid snapshot key `{key}` at byte {offset}: {reason}")]
+    #[diagnostic(code(pudu::lock::key_parse))]
+    KeyParse {
+        key: String,
+        offset: usize,
+        reason: String,
+    },
+
+    #[error("snapshot `{snapshot}` has no entry under `packages:` for `{base}`")]
+    #[diagnostic(
+        code(pudu::lock::missing_package_meta),
+        help("The lockfile is inconsistent. Re-run `pnpm install` to regenerate it.")
+    )]
+    MissingPackageMeta { snapshot: String, base: String },
+
+    #[error(
+        "`{from}` depends on `{link_name}`, which resolves to `{resolved}` — absent from `snapshots:`"
+    )]
+    #[diagnostic(
+        code(pudu::lock::unresolved_edge),
+        help("The lockfile is inconsistent. Re-run `pnpm install` to regenerate it.")
+    )]
+    UnresolvedEdge {
+        from: String,
+        link_name: String,
+        resolved: String,
+    },
+
+    #[error("`{a}` and `{b}` both map to the Buck target name `{target}`")]
+    #[diagnostic(code(pudu::lock::target_name_collision))]
+    TargetNameCollision {
+        a: String,
+        b: String,
+        target: String,
+    },
+
+    #[error("this lockfile uses patchedDependencies, which pudu cannot reproduce")]
+    #[diagnostic(
+        code(pudu::lock::patched_dependencies),
+        help(
+            "A patch changes a package's contents, so ignoring it would emit a build that silently does not match your source. Remove the patch, or wait for pudu to support it."
+        )
+    )]
+    PatchedDependencies,
+
+    #[error("this lockfile was written with excludeLinksFromLockfile: true")]
+    #[diagnostic(
+        code(pudu::lock::excluded_links),
+        help(
+            "`link:` dependencies are omitted from the lockfile, so the dependency graph would be silently incomplete. Set excludeLinksFromLockfile=false in .npmrc and re-run `pnpm install`."
+        )
+    )]
+    ExcludedLinks,
+}
+
+/// Non-fatal lockfile observations.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
+pub enum LockWarning {
+    #[error("unrecognised top-level key `{key}` in the lockfile")]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::lock::unknown_top_level_key),
+        help(
+            "pudu does not read this key. If it changes how dependencies resolve, the generated build may be wrong."
+        )
+    )]
+    UnknownTopLevelKey { key: String },
+
+    #[error("`{key}` is deprecated: {message}")]
+    #[diagnostic(severity(Warning), code(pudu::lock::deprecated_package))]
+    DeprecatedPackage { key: String, message: String },
+}
+
 // --- Platform derivation (pudu init) -------------------------------------
 
 /// Non-fatal findings from `pudu init`'s `supportedArchitectures` expansion.
@@ -474,6 +575,7 @@ typed_errors! {
     CliError => CliError::exit_code,
     ConfigError => |_| ExitCode::InputInvalid,
     DeriveError => |_| ExitCode::InputInvalid,
+    LockError => |_| ExitCode::InputInvalid,
 }
 
 /// The exit code an `anyhow` error from the CLI boundary maps to.
@@ -654,6 +756,11 @@ mod tests {
                     warnings: vec![],
                 }
                 .into(),
+                ExitCode::InputInvalid,
+            ),
+            (
+                "LockError",
+                LockError::PatchedDependencies.into(),
                 ExitCode::InputInvalid,
             ),
         ]
