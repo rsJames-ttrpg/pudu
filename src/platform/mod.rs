@@ -5,6 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod constraints;
+pub mod matching;
+pub mod prune;
+
+pub use matching::{admits, admits_platform};
+
 /// Operating system, using npm's `os` field vocabulary.
 ///
 /// `Win32` is representable even though Windows is a v1 non-goal: npm packages

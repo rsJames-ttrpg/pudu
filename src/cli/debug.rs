@@ -9,13 +9,18 @@ use anyhow::Result;
 
 use crate::config::Config;
 use crate::error::{CliError, ConfigError, render};
+use crate::lock::types::Lockfile;
 use crate::lock::{Graph, SUPPORTED_VERSION, parse_lockfile};
+use crate::platform::constraints::constraint_labels;
+use crate::platform::prune::prune;
 
-/// Print the instance graph as JSON on stdout.
+/// Load `pudu.toml` and the lockfile it names, printing any lockfile
+/// warnings to stderr.
 ///
-/// Warnings go to stderr via [`render`]; the JSON goes to stdout, so stdout
-/// stays machine-parseable.
-pub fn print_graph() -> Result<()> {
+/// Shared by every `pudu debug` subcommand: they all start from the same
+/// two files, and the not-found/unreadable distinction below is worth
+/// stating once.
+fn load() -> Result<(Config, Lockfile)> {
     let config_path = Path::new("pudu.toml");
     let config_text =
         std::fs::read_to_string(config_path).map_err(|source| CliError::ConfigUnreadable {
@@ -47,7 +52,15 @@ pub fn print_graph() -> Result<()> {
     for w in &warnings {
         eprint!("{}", render(w));
     }
+    Ok((config, lockfile))
+}
 
+/// Print the instance graph as JSON on stdout.
+///
+/// Warnings go to stderr via [`render`]; the JSON goes to stdout, so stdout
+/// stays machine-parseable.
+pub fn print_graph() -> Result<()> {
+    let (_config, lockfile) = load()?;
     let graph = Graph::build(&lockfile)?;
     let out = serde_json::json!({
         // The constant, not an observation of the parsed file: `parse_lockfile`
@@ -62,5 +75,47 @@ pub fn print_graph() -> Result<()> {
         "cycles": graph.cycles,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+/// Print the per-platform pruning view as JSON on stdout.
+///
+/// Warnings go to stderr via [`render`]; the JSON goes to stdout, so stdout
+/// stays machine-parseable.
+///
+/// Every field here is pudu's own invention rather than an echo of the
+/// lockfile, so every key is `snake_case` (S1's key-spelling rule).
+pub fn platforms() -> Result<()> {
+    let (config, lockfile) = load()?;
+    let graph = Graph::build(&lockfile)?;
+    let (matrix, warnings) = prune(&graph, &config.platforms);
+    for w in &warnings {
+        eprint!("{}", render(w));
+    }
+
+    let mut out = serde_json::Map::new();
+    for (name, platform) in &config.platforms {
+        let view = &matrix.views[name];
+        out.insert(
+            name.clone(),
+            serde_json::json!({
+                "os": platform.os.as_npm(),
+                "cpu": platform.cpu.as_npm(),
+                "libc": platform.libc.map(|l| l.as_npm()),
+                "constraints": constraint_labels(platform, &config.platforms),
+                // Recorded so a user debugging a mis-selected target can see
+                // the escape hatch applied without re-reading their config.
+                "constraints_overridden": platform.constraints.is_some(),
+                "node_count": view.nodes.len(),
+                "pruned": view.pruned,
+                "dropped_required_edges": view.dropped_required_edges,
+            }),
+        );
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({ "platforms": out }))?
+    );
     Ok(())
 }

@@ -79,6 +79,8 @@ pub enum Commands {
 pub enum DebugCommands {
     /// Print the instance graph as JSON.
     PrintGraph,
+    /// Print the per-platform pruning view as JSON.
+    Platforms,
 }
 
 #[derive(Subcommand, Debug)]
@@ -117,6 +119,7 @@ impl Cli {
             Commands::Unused => Err(stub::unimplemented("unused", "Phase 2")),
             Commands::Debug { command } => match command {
                 DebugCommands::PrintGraph => debug::print_graph(),
+                DebugCommands::Platforms => debug::platforms(),
             },
         }
     }

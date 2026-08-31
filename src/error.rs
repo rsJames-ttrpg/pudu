@@ -357,6 +357,64 @@ pub enum LockWarning {
     DeprecatedPackage { key: String, message: String },
 }
 
+// --- Platform pruning (S2) ------------------------------------------------
+
+/// Non-fatal findings from per-platform pruning.
+///
+/// S2 introduces no hard errors: every condition here is a property of
+/// somebody's dependency tree rather than of pudu's input being malformed,
+/// and none of them makes the rest of the output wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
+pub enum PlatformWarning {
+    #[error("`{dependent}` requires `{target}`, which is excluded on platform `{platform}`")]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::platform::required_dependency_excluded),
+        help(
+            "pudu drops the dependency for this platform. pnpm would install it anyway; if the package is genuinely needed here, it may need a fixup."
+        )
+    )]
+    RequiredDependencyExcluded {
+        dependent: String,
+        target: String,
+        platform: String,
+    },
+
+    #[error(
+        "{} package(s) are excluded on every configured platform ({}): {}",
+        packages.len(),
+        platforms.join(", "),
+        capped_list(packages, 10)
+    )]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::platform::excluded_everywhere),
+        help(
+            "these packages appear in no generated target. That is expected for the platform-specific binaries of a package like `esbuild`, and worth checking for anything else."
+        )
+    )]
+    ExcludedEverywhere {
+        packages: Vec<String>,
+        platforms: Vec<String>,
+    },
+}
+
+/// Render a name list as a comma-separated paragraph, capped so a large
+/// aggregate (the real fixture has 78 names) stays readable. The count
+/// still comes from the caller (e.g. `packages.len()`), so it is always
+/// exact even when the inline list is truncated.
+fn capped_list(items: &[String], cap: usize) -> String {
+    if items.len() <= cap {
+        items.join(", ")
+    } else {
+        format!(
+            "{}, …and {} more",
+            items[..cap].join(", "),
+            items.len() - cap
+        )
+    }
+}
+
 // --- Platform derivation (pudu init) -------------------------------------
 
 /// Non-fatal findings from `pudu init`'s `supportedArchitectures` expansion.
@@ -384,6 +442,22 @@ pub enum DeriveWarning {
     #[error("pnpm-workspace.yaml: ignoring unknown libc `{value}`")]
     #[diagnostic(severity(Warning), code(pudu::init::unknown_libc))]
     UnknownLibc { value: String },
+
+    #[error("pnpm-workspace.yaml: supportedArchitectures must be a mapping of os/cpu/libc lists")]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::init::supported_architectures_not_a_mapping),
+        help("the block is ignored; see https://pnpm.io/settings#supportedarchitectures")
+    )]
+    SupportedArchitecturesNotAMapping,
+
+    #[error("pnpm-workspace.yaml: ignoring non-string entry in supportedArchitectures.{key}")]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::init::non_string_axis_entry),
+        help("every entry must be a quoted or bare string, e.g. `cpu: [x64, arm64]`")
+    )]
+    NonStringAxisEntry { key: String },
 }
 
 /// Failures of `pudu init`'s `supportedArchitectures` expansion.
@@ -396,6 +470,19 @@ pub enum DeriveError {
         #[source]
         source: serde_norway::Error,
     },
+
+    #[error(
+        "pnpm-workspace.yaml: supportedArchitectures.{key} must be a list, e.g. `{key}: [{example}]`"
+    )]
+    #[diagnostic(
+        code(pudu::init::axis_not_a_sequence),
+        help(
+            "a bare scalar like `{key}: {example}` is a more likely typo than an empty match, \
+             so it is rejected rather than silently falling back to the host platform; wrap it \
+             in brackets to make it a one-entry list, e.g. `{key}: [{example}]`"
+        )
+    )]
+    AxisNotASequence { key: String, example: String },
 
     #[error(
         "pnpm-workspace.yaml declares no supported platforms pudu can target \
@@ -703,6 +790,19 @@ mod tests {
     }
 
     #[test]
+    fn axis_not_a_sequence_renders_its_help_text() {
+        let out = render(&DeriveError::AxisNotASequence {
+            key: "os".into(),
+            example: "linux".into(),
+        });
+        assert!(out.contains("os: [linux]"), "{out}");
+        assert!(
+            out.contains("typo"),
+            "help must explain why this is fatal, not just how to fix it: {out}"
+        );
+    }
+
+    #[test]
     fn exit_codes_are_classified() {
         let cases: [(anyhow::Error, ExitCode); 5] = [
             (
@@ -806,5 +906,87 @@ mod tests {
             covered, REGISTERED_ERRORS,
             "every type in the `typed_errors!` registry needs a sample above"
         );
+    }
+
+    #[test]
+    fn required_dependency_excluded_names_all_three_parties() {
+        let w = PlatformWarning::RequiredDependencyExcluded {
+            dependent: "my-app@1.0.0".into(),
+            target: "fsevents@2.3.3".into(),
+            platform: "linux-x64-gnu".into(),
+        };
+        let msg = w.to_string();
+        assert!(msg.contains("my-app@1.0.0"), "names the dependent: {msg}");
+        assert!(msg.contains("fsevents@2.3.3"), "names the target: {msg}");
+        assert!(msg.contains("linux-x64-gnu"), "names the platform: {msg}");
+    }
+
+    /// Fires once for the whole set, not once per package: on the committed
+    /// fixture a per-package warning would print ~60 times and train the
+    /// user to ignore warnings.
+    #[test]
+    fn excluded_everywhere_aggregates_into_one_message() {
+        let w = PlatformWarning::ExcludedEverywhere {
+            packages: vec![
+                "@esbuild/aix-ppc64@0.25.12".into(),
+                "@esbuild/sunos-x64@0.25.12".into(),
+            ],
+            platforms: vec!["linux-x64-gnu".into(), "darwin-arm64".into()],
+        };
+        let msg = w.to_string();
+        assert!(msg.contains("@esbuild/aix-ppc64@0.25.12"), "{msg}");
+        assert!(msg.contains("@esbuild/sunos-x64@0.25.12"), "{msg}");
+        assert!(msg.contains("2 package(s)"), "states how many: {msg}");
+    }
+
+    /// On the real fixture this renders 78 package names as one unwrapped
+    /// paragraph, which is unreadable. Cap the inline list at 10, still
+    /// stating the full count.
+    #[test]
+    fn excluded_everywhere_caps_the_inline_list_but_keeps_the_full_count() {
+        let packages: Vec<String> = (0..15).map(|i| format!("pkg-{i}@1.0.0")).collect();
+        let w = PlatformWarning::ExcludedEverywhere {
+            packages: packages.clone(),
+            platforms: vec!["linux-x64-gnu".into()],
+        };
+        let msg = w.to_string();
+        assert!(msg.contains("15 package(s)"), "full count: {msg}");
+        for p in &packages[..10] {
+            assert!(msg.contains(p.as_str()), "first 10 listed: {msg}");
+        }
+        for p in &packages[10..] {
+            assert!(!msg.contains(p.as_str()), "not listed past the cap: {msg}");
+        }
+        assert!(msg.contains("…and 5 more"), "{msg}");
+    }
+
+    #[test]
+    fn platform_warnings_render_at_warning_severity_with_a_code() {
+        let w1 = PlatformWarning::RequiredDependencyExcluded {
+            dependent: "a@1".into(),
+            target: "b@2".into(),
+            platform: "p".into(),
+        };
+        assert_eq!(w1.severity(), Some(miette::Severity::Warning));
+        assert!(w1.code().is_some(), "every diagnostic carries a code");
+        let out1 = render(&w1);
+        assert!(
+            out1.contains("pudu::platform::required_dependency_excluded"),
+            "{out1}"
+        );
+        assert!(out1.contains("fixup"), "{out1}");
+
+        let w2 = PlatformWarning::ExcludedEverywhere {
+            packages: vec!["b@2".into()],
+            platforms: vec!["p".into()],
+        };
+        assert_eq!(w2.severity(), Some(miette::Severity::Warning));
+        assert!(w2.code().is_some(), "every diagnostic carries a code");
+        let out2 = render(&w2);
+        assert!(
+            out2.contains("pudu::platform::excluded_everywhere"),
+            "{out2}"
+        );
+        assert!(out2.contains("generated target"), "{out2}");
     }
 }

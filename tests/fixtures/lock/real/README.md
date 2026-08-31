@@ -80,3 +80,61 @@ confirmed to fail under the same mutation. The two layers are complementary:
 
 **So do not treat a green differential test as proof the port is intact.**
 Both layers must stay.
+
+## Per-platform pruning oracles (S2)
+
+`oracle/*.txt` are the same kind of capture as `virtual-store-listing.txt`,
+one per platform: the exact directories pnpm created in `node_modules/.pnpm/`
+with `supportedArchitectures` pinned. `tests/platform_oracle.rs` asserts pudu
+reproduces each set exactly.
+
+| platform | directories |
+|---|---|
+| linux-x64-gnu | 316 |
+| linux-x64-musl | 316 |
+| linux-arm64-gnu | 316 |
+| darwin-arm64 | 315 |
+
+`oracle/linux-x64-gnu.txt` is byte-identical to `virtual-store-listing.txt`,
+which is asserted by a test — S1's fixture was captured on a glibc x86_64
+host, and the two must not drift apart.
+
+Captured with **pnpm 10.21.0** and **node v24.6.0** by
+`oracle/capture.sh`. Regenerate every file together, including
+`engine-excluded.txt`, and update the versions here.
+
+### Why `engine-excluded.txt` exists
+
+pnpm skips an **optional** dependency that fails its `engines` check, so a
+virtual-store listing is not a pure *platform* oracle. Pudu deliberately does
+not model `engines` — node version is not a platform axis (design §5) — so
+its survivor set is a superset of pnpm's by exactly that set, and the test
+subtracts it.
+
+At the recorded node version this is one package,
+`@napi-rs/lzma-linux-x64-gnu@1.5.1`, which wants
+`node: ^22.20 || ^24.12 || >=25`. It is eligible by platform on linux-x64 and
+skipped by engines, and it was the single discrepancy when this design was
+validated. On node ≥ 24.12 the file is empty — which is correct, not broken.
+
+### What these oracles cannot catch
+
+Every one of the fixture's 90 platform-gated snapshot keys is a **leaf**: none
+has dependencies of its own. So these oracles cannot distinguish pudu's
+per-package pruning from a design that also sweeps away packages left
+unreachable when their only parent is pruned. They show the simpler design is
+not wrong here, not that a sweep is unnecessary in general (TD-S2-01).
+
+They also carry no `libc` field and no negation — see the platform matching
+survey §2 for why no public-registry install can produce either. That coverage
+comes from `tests/platform_fuzz.rs` instead.
+
+### Differential fuzz
+
+`tests/platform_fuzz.rs` checks `admits` against pnpm's real `checkPlatform`
+over 3000 generated cases spanning absent, empty, singleton, multi-entry,
+all-negative and mixed lists on all three axes. It is `#[ignore]`d so the
+default suite needs no node.
+
+Last run: **3000 cases, zero disagreements**, against
+`@pnpm/package-is-installable@1000.0.21` on node v24.6.0.
