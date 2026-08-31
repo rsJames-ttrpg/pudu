@@ -268,6 +268,13 @@ The platform need not exclude itself from that scan: it shares its own `os`,
 
 A platform whose `libc` is `None` never gains an abi label regardless.
 
+Because of that last rule, two configured platforms can emit byte-identical
+label sets when one declares no `libc` at all: `[platforms.linux-x64]` (no
+`libc`) and `[platforms.linux-x64-musl]` (`libc = "musl"`) both emit only the
+linux + x86_64 pair, since the platform with no `libc` never discriminates
+and never gets discriminated against. S2 does not validate against this —
+see TD-S2-06.
+
 ### 5.3 Escape hatch
 
 When `[platforms.<name>]` sets `constraints = [...]`, that list replaces the

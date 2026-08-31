@@ -427,16 +427,6 @@ pub enum DeriveWarning {
     #[diagnostic(severity(Warning), code(pudu::init::unknown_libc))]
     UnknownLibc { value: String },
 
-    #[error(
-        "pnpm-workspace.yaml: supportedArchitectures.{key} must be a list, e.g. `{key}: [{example}]`"
-    )]
-    #[diagnostic(
-        severity(Warning),
-        code(pudu::init::axis_not_a_sequence),
-        help("a bare value is ignored; wrap it in brackets to make it a one-entry list")
-    )]
-    AxisNotASequence { key: String, example: String },
-
     #[error("pnpm-workspace.yaml: supportedArchitectures must be a mapping of os/cpu/libc lists")]
     #[diagnostic(
         severity(Warning),
@@ -464,6 +454,19 @@ pub enum DeriveError {
         #[source]
         source: serde_norway::Error,
     },
+
+    #[error(
+        "pnpm-workspace.yaml: supportedArchitectures.{key} must be a list, e.g. `{key}: [{example}]`"
+    )]
+    #[diagnostic(
+        code(pudu::init::axis_not_a_sequence),
+        help(
+            "a bare scalar like `{key}: {example}` is a more likely typo than an empty match, \
+             so it is rejected rather than silently falling back to the host platform; wrap it \
+             in brackets to make it a one-entry list, e.g. `{key}: [{example}]`"
+        )
+    )]
+    AxisNotASequence { key: String, example: String },
 
     #[error(
         "pnpm-workspace.yaml declares no supported platforms pudu can target \
@@ -768,6 +771,19 @@ mod tests {
         });
         assert!(out.contains("libc"), "{out}");
         assert!(out.contains("uclibc"), "the reason must survive:\n{out}");
+    }
+
+    #[test]
+    fn axis_not_a_sequence_renders_its_help_text() {
+        let out = render(&DeriveError::AxisNotASequence {
+            key: "os".into(),
+            example: "linux".into(),
+        });
+        assert!(out.contains("os: [linux]"), "{out}");
+        assert!(
+            out.contains("typo"),
+            "help must explain why this is fatal, not just how to fix it: {out}"
+        );
     }
 
     #[test]

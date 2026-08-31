@@ -75,17 +75,21 @@ fn host_cpu() -> Cpu {
 
 /// Read a `supportedArchitectures` axis into a list of strings.
 ///
-/// Reports rather than silently discarding: a bare scalar
-/// (`os: linux` instead of `os: [linux]`) and a non-string entry
-/// (`cpu: [123]`) were both dropped in silence before, so a typo cost the
-/// user their whole intent with no diagnostic (TD-S0-08, TD-S0-09).
-fn axis(v: &serde_norway::Value, key: &str, warnings: &mut Vec<DeriveWarning>) -> Vec<String> {
+/// Reports rather than silently discarding: a non-string entry
+/// (`cpu: [123]`) is warned about (TD-S0-09), and a bare scalar
+/// (`os: linux` instead of `os: [linux]`) is a hard error (TD-S0-08) — see
+/// [`DeriveError::AxisNotASequence`] for why that one can't just warn.
+fn axis(
+    v: &serde_norway::Value,
+    key: &str,
+    warnings: &mut Vec<DeriveWarning>,
+) -> Result<Vec<String>, DeriveError> {
     let Some(entry) = v.get(key) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let Some(seq) = entry.as_sequence() else {
-        warnings.push(DeriveWarning::AxisNotASequence {
+        return Err(DeriveError::AxisNotASequence {
             key: key.to_string(),
             example: match key {
                 "os" => "linux",
@@ -94,7 +98,6 @@ fn axis(v: &serde_norway::Value, key: &str, warnings: &mut Vec<DeriveWarning>) -
             }
             .to_string(),
         });
-        return Vec::new();
     };
 
     let mut out = Vec::with_capacity(seq.len());
@@ -113,27 +116,18 @@ fn axis(v: &serde_norway::Value, key: &str, warnings: &mut Vec<DeriveWarning>) -
             None => {}
         }
     }
-    out
+    Ok(out)
 }
 
 /// Whether an axis key was present in the yaml at all (as opposed to
 /// absent, which falls back to the host value).
+///
+/// A malformed axis (a bare scalar like `os: linux`) never reaches this
+/// point: [`axis`] returns [`DeriveError::AxisNotASequence`] for it, which
+/// `derive_platforms` propagates immediately. So by the time this is
+/// consulted, a present key is always a sequence.
 fn axis_present(v: &serde_norway::Value, key: &str) -> bool {
     v.get(key).is_some()
-}
-
-/// Whether an axis key was present **and shaped as a sequence**.
-///
-/// A bare scalar (`os: linux`) is reported by [`axis`] via
-/// [`DeriveWarning::AxisNotASequence`] and, like an absent key, must fall
-/// back to the host/default value rather than surface as
-/// `NoUsablePlatforms` — the user's intent already got a diagnostic, so
-/// treating the malformed axis as "user specified nothing usable" would be
-/// a second, more confusing failure for the same mistake. A syntactically
-/// valid sequence that filters down to nothing (e.g. `os: [win32]`) is a
-/// different case and still errors.
-fn axis_is_a_sequence(v: &serde_norway::Value, key: &str) -> bool {
-    v.get(key).is_none_or(|entry| entry.as_sequence().is_some())
 }
 
 /// Expand `supportedArchitectures` into a platform matrix, or return the
@@ -174,7 +168,7 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
     }
 
     let mut oses = Vec::new();
-    for raw in axis(&sa, "os", &mut warnings) {
+    for raw in axis(&sa, "os", &mut warnings)? {
         match raw.as_str() {
             "current" => oses.push(host_os()),
             "linux" => oses.push(Os::Linux),
@@ -187,7 +181,7 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
     }
 
     let mut cpus = Vec::new();
-    for raw in axis(&sa, "cpu", &mut warnings) {
+    for raw in axis(&sa, "cpu", &mut warnings)? {
         match raw.as_str() {
             "current" => cpus.push(host_cpu()),
             "x64" => cpus.push(Cpu::X64),
@@ -199,7 +193,7 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
     }
 
     let mut libcs = Vec::new();
-    for raw in axis(&sa, "libc", &mut warnings) {
+    for raw in axis(&sa, "libc", &mut warnings)? {
         match raw.as_str() {
             "current" | "glibc" => libcs.push(Libc::Glibc),
             "musl" => libcs.push(Libc::Musl),
@@ -210,18 +204,19 @@ pub fn derive_platforms(workspace_yaml: Option<&str>) -> Result<DerivedPlatforms
     }
 
     // Only fall back to the host/default when the axis key was absent
-    // entirely, or malformed (not a sequence — already reported above).
-    // When the key was present as a valid sequence but every entry was
-    // filtered out (e.g. `os: [win32]`), the axis stays empty so the
-    // cross-product below yields no platforms and this surfaces as an
-    // error rather than silently substituting the host.
-    if oses.is_empty() && !(axis_present(&sa, "os") && axis_is_a_sequence(&sa, "os")) {
+    // entirely. A malformed axis (not a sequence) already returned
+    // `DeriveError::AxisNotASequence` above. When the key was present as a
+    // valid sequence but every entry was filtered out (e.g. `os: [win32]`),
+    // the axis stays empty so the cross-product below yields no platforms
+    // and this surfaces as an error rather than silently substituting the
+    // host.
+    if oses.is_empty() && !axis_present(&sa, "os") {
         oses.push(host_os());
     }
-    if cpus.is_empty() && !(axis_present(&sa, "cpu") && axis_is_a_sequence(&sa, "cpu")) {
+    if cpus.is_empty() && !axis_present(&sa, "cpu") {
         cpus.push(host_cpu());
     }
-    if libcs.is_empty() && !(axis_present(&sa, "libc") && axis_is_a_sequence(&sa, "libc")) {
+    if libcs.is_empty() && !axis_present(&sa, "libc") {
         libcs.push(Libc::Glibc);
     }
 
@@ -816,18 +811,20 @@ mod tests {
     }
 
     /// TD-S0-08: `os: linux` (a bare scalar, not a sequence) is a plausible
-    /// typo. It must say so, not fail elsewhere with a misleading message.
+    /// typo, and a strictly more likely one than `os: [win32]` — which
+    /// already hard-errors as `NoUsablePlatforms`. Letting the bare-scalar
+    /// case merely warn and silently fall back to the host value would be
+    /// the more forgiving outcome for the more likely mistake, and that
+    /// fallback gets written into `pudu.toml` where it stops looking like a
+    /// warning at all. So this is a hard error naming the axis, not a
+    /// warning.
     #[test]
-    fn a_non_sequence_axis_warns_naming_the_axis() {
+    fn a_non_sequence_axis_is_a_hard_error_naming_the_axis() {
         let yaml = "supportedArchitectures:\n  os: linux\n  cpu: [x64]\n";
-        let d = derive_platforms(Some(yaml)).expect("must not be fatal");
+        let err = derive_platforms(Some(yaml)).expect_err("must be fatal");
         assert!(
-            d.warnings.iter().any(|w| matches!(
-                w,
-                DeriveWarning::AxisNotASequence { key, .. } if key == "os"
-            )),
-            "warnings: {:?}",
-            d.warnings
+            matches!(&err, DeriveError::AxisNotASequence { key, .. } if key == "os"),
+            "error: {err:?}"
         );
     }
 

@@ -2543,6 +2543,21 @@ load-bearing.
 Append to the `mod tests` block in `src/cli/init.rs`. Read the existing
 tests first and follow their shape for calling `derive_platforms`.
 
+> **Post-review correction (final whole-branch review, 2026-08-31):** the
+> human reviewer ruled that a bare-scalar axis must be a **hard error**, not
+> a warning with host fallback. The semantics were asymmetric the wrong way:
+> `os: [win32]` — a valid sequence that filters to nothing — already
+> hard-errors as `NoUsablePlatforms`, while `os: linux` — a strictly more
+> likely typo — silently substituted the host value. That fallback then got
+> written into `pudu.toml`, where it stops being a warning and becomes a
+> fact later stages inherit; on a Linux CI box `os: linux` falls back to
+> linux and the typo is invisible until someone runs it on a Mac. The test
+> below is superseded — `AxisNotASequence` is a `DeriveError` variant, not a
+> `DeriveWarning`, and `derive_platforms` returns `Err` for it instead of a
+> warning-carrying `Ok`. See `src/error.rs` and `src/cli/init.rs` for the
+> implementation and `a_non_sequence_axis_is_a_hard_error_naming_the_axis`
+> for the corrected test.
+
 ```rust
     /// TD-S0-08: `os: linux` (a bare scalar, not a sequence) is a plausible
     /// typo. It must say so, not fail elsewhere with a misleading message.
@@ -2559,7 +2574,27 @@ tests first and follow their shape for calling `derive_platforms`.
             d.warnings
         );
     }
+```
 
+**Superseded — see correction note above. The test now used is:**
+
+```rust
+    /// TD-S0-08: `os: linux` (a bare scalar, not a sequence) is a plausible
+    /// typo, and a strictly more likely one than `os: [win32]`, which
+    /// already hard-errors. It is a hard error naming the axis, not a
+    /// warning.
+    #[test]
+    fn a_non_sequence_axis_is_a_hard_error_naming_the_axis() {
+        let yaml = "supportedArchitectures:\n  os: linux\n  cpu: [x64]\n";
+        let err = derive_platforms(Some(yaml)).expect_err("must be fatal");
+        assert!(
+            matches!(&err, DeriveError::AxisNotASequence { key, .. } if key == "os"),
+            "error: {err:?}"
+        );
+    }
+```
+
+```rust
     /// TD-S0-08: a non-mapping `supportedArchitectures` was ignored in
     /// silence, which is the worst outcome — the user's intent vanishes.
     #[test]
