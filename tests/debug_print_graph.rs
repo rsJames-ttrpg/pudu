@@ -27,10 +27,11 @@ fn print_graph_emits_json_for_the_real_lockfile() {
     assert_eq!(v["lockfile_version"], "9.0");
 }
 
-/// Byte equality alone is weak: two runs that both fail identically, or both
-/// print nothing, would also compare equal. The size and success checks give
-/// this test teeth — it fails if determinism is achieved by both runs
-/// producing the same *empty or broken* output.
+/// Byte equality alone is weak: two runs that both fail identically, both
+/// print nothing, or both emit 1000+ bytes of malformed/wrong-shaped JSON
+/// would also compare equal. Parsing `a.stdout` and asserting on a known node
+/// count and a known key gives this test teeth: it would itself have caught
+/// a JSON-shape regression (e.g. wrong key casing), not just non-determinism.
 #[test]
 fn output_is_byte_identical_across_runs() {
     let dir = common::scratch_with_config(fixture());
@@ -43,12 +44,68 @@ fn output_is_byte_identical_across_runs() {
         .output()
         .unwrap();
     assert!(a.status.success(), "{}", String::from_utf8_lossy(&a.stderr));
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&a.stdout).expect("stdout must be valid JSON, not just consistent");
+    assert_eq!(v["lockfile_version"], "9.0");
     assert!(
-        a.stdout.len() > 1000,
-        "output must be a real graph, not a trivially-matching empty/short output: {} bytes",
-        a.stdout.len()
+        v["nodes"].as_object().unwrap().len() > 300,
+        "the fixture has 400 keys"
     );
+    assert!(
+        v["nodes"].as_object().unwrap().contains_key("glob@10.4.5"),
+        "expected a known node from the fixture"
+    );
+
     assert_eq!(a.stdout, b.stdout, "determinism is an invariant");
+}
+
+/// Pins the JSON contract's key-spelling rule (spec §10, as amended): fields
+/// pudu invents are snake_case (`target_name`, `link_name`,
+/// `lockfile_version`); fields echoed straight from the lockfile keep pnpm's
+/// own camelCase spelling (`autoInstallPeers`, `hasBin`), so a reader can
+/// grep a key from this output straight into `pnpm-lock.yaml`. Nothing else
+/// in this file checks key spelling at all — a `rename_all` change on
+/// `Settings` or `PackageMeta` would otherwise pass every other test here.
+#[test]
+fn json_keys_follow_the_invented_vs_echoed_spelling_rule() {
+    let dir = common::scratch_with_config(fixture());
+    let out = common::pudu(dir.path())
+        .args(["debug", "print-graph"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    // Invented fields: snake_case.
+    assert!(v.get("lockfile_version").is_some());
+    let nodes = v["nodes"].as_object().unwrap();
+    let glob = &nodes["glob@10.4.5"];
+    assert!(glob.get("target_name").is_some(), "{glob}");
+    let edges = glob["edges"].as_array().unwrap();
+    assert!(
+        edges.iter().all(|e| e.get("link_name").is_some()),
+        "{edges:?}"
+    );
+
+    // Echoed-from-lockfile fields: pnpm's own camelCase.
+    let settings = &v["settings"];
+    assert!(settings.get("autoInstallPeers").is_some(), "{settings}");
+    assert!(
+        settings.get("excludeLinksFromLockfile").is_some(),
+        "{settings}"
+    );
+    assert!(settings.get("auto_install_peers").is_none());
+
+    let meta = &glob["meta"];
+    assert!(meta["resolution"].get("integrity").is_some(), "{meta}");
+    assert!(meta.get("hasBin").is_some(), "{meta}");
+    assert!(meta.get("has_bin").is_none());
+    assert!(meta.get("os").is_some() || meta["os"].is_null(), "{meta}");
 }
 
 #[test]
