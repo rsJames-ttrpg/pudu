@@ -21,6 +21,20 @@ use std::fmt;
 /// erroring, so depth is capped explicitly.
 pub const MAX_PEER_DEPTH: usize = 64;
 
+/// Maximum total key length in bytes. Checked once, at [`SnapshotKey::parse`]
+/// — the public entry point — not in the recursive `parse_inner`, so a key's
+/// nested peers are not each re-checked against it. The real-world corpus's
+/// longest key is 422 bytes; 8192 leaves roughly nineteen times headroom.
+///
+/// [`MAX_PEER_DEPTH`] alone does not bound worst-case cost: a key can stay
+/// under the depth cap while still being enormous (many peers at shallow
+/// depth, or long identifiers), and parsing time was observed to grow
+/// quadratically with key length even with the depth cap in place — a
+/// 40,000-level, ~549KB adversarial key took over 20s despite the cap
+/// correctly firing at depth 65 every time. The two caps guard different
+/// shapes (depth vs. raw length) and both are cheap to check.
+pub const MAX_KEY_LEN: usize = 8192;
+
 /// A parsed snapshot key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotKey {
@@ -54,6 +68,13 @@ impl std::error::Error for KeyParseError {}
 impl SnapshotKey {
     /// Parse a snapshot key.
     pub fn parse(s: &str) -> Result<Self, KeyParseError> {
+        if s.len() > MAX_KEY_LEN {
+            return Err(KeyParseError {
+                key: s.to_string(),
+                offset: MAX_KEY_LEN,
+                reason: "key exceeds the maximum length of 8192 bytes",
+            });
+        }
         Self::parse_inner(s, s, 0, 0)
     }
 
@@ -375,5 +396,44 @@ mod tests {
             s = format!("p{i}@1.0.0({s})");
         }
         s
+    }
+
+    #[test]
+    fn key_just_under_the_length_cap_parses_or_fails_for_its_own_reason() {
+        // A single bare name@version padded with identifier characters to
+        // just under MAX_KEY_LEN. It must not be rejected for length.
+        let padding = "a".repeat(MAX_KEY_LEN - "x@1.0.0".len() - 1);
+        let key = format!("x{padding}@1.0.0");
+        assert!(key.len() < MAX_KEY_LEN);
+        let result = SnapshotKey::parse(&key);
+        if let Err(e) = result {
+            assert_ne!(
+                e.reason, "key exceeds the maximum length of 8192 bytes",
+                "a key under the cap must not fail for length: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn key_over_the_length_cap_is_rejected_for_length() {
+        let key = format!("x@{}", "1".repeat(MAX_KEY_LEN));
+        assert!(key.len() > MAX_KEY_LEN);
+        let e = SnapshotKey::parse(&key).unwrap_err();
+        assert_eq!(e.reason, "key exceeds the maximum length of 8192 bytes");
+    }
+
+    #[test]
+    fn deeply_nested_oversized_key_is_rejected_quickly_not_hung() {
+        // The pathological case from review: 40,000 levels deep, ~549KB.
+        // The length cap must reject it well before any recursion happens.
+        let key = nested_key(40_000);
+        let start = std::time::Instant::now();
+        let e = SnapshotKey::parse(&key).unwrap_err();
+        let elapsed = start.elapsed();
+        assert_eq!(e.reason, "key exceeds the maximum length of 8192 bytes");
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "must reject in well under 50ms, took {elapsed:?}"
+        );
     }
 }
