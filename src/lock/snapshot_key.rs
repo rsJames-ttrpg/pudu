@@ -484,13 +484,10 @@ mod tests {
         let padding = "a".repeat(MAX_KEY_LEN - "x@1.0.0".len() - 1);
         let key = format!("x{padding}@1.0.0");
         assert!(key.len() < MAX_KEY_LEN);
-        let result = SnapshotKey::parse(&key);
-        if let Err(e) = result {
-            assert_ne!(
-                e.reason, "key exceeds the maximum length of 8192 bytes",
-                "a key under the cap must not fail for length: {e}"
-            );
-        }
+        let k = SnapshotKey::parse(&key)
+            .unwrap_or_else(|e| panic!("a key under the cap must parse, not fail: {e}"));
+        assert_eq!(k.name, format!("x{padding}"));
+        assert_eq!(k.version, "1.0.0");
     }
 
     #[test]
@@ -609,8 +606,16 @@ mod target_name_tests {
 
     #[test]
     fn snapshot_key_method_agrees_with_the_free_function() {
+        // `SnapshotKey::target_name` is defined as
+        // `target_name(&self.canonical())`, so comparing it against
+        // `target_name(raw)` would only restate that definition. Assert a
+        // concrete expected string instead, so a change to either the
+        // parser's canonicalization or the escaping rules is caught.
         let raw = "eslint-plugin-svelte@3.14.0(eslint@9.39.2(jiti@2.6.1))(svelte@5.49.1)";
         let k = SnapshotKey::parse(raw).unwrap();
-        assert_eq!(k.target_name(), target_name(raw));
+        assert_eq!(
+            k.target_name(),
+            "eslint-plugin-svelte@3.14.0_eslint@9.39.2_jiti@2.6.1__svelte@5.49.1"
+        );
     }
 }
