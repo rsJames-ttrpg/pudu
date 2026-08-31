@@ -158,6 +158,15 @@ mod tests {
     }
 
     #[test]
+    fn empty_or_absent_patched_dependencies_is_tolerated() {
+        let empty = format!("{MINIMAL}patchedDependencies: {{}}\n");
+        assert!(parse(&empty).is_ok(), "empty mapping must not be an error");
+
+        let null = format!("{MINIMAL}patchedDependencies:\n");
+        assert!(parse(&null).is_ok(), "null value must not be an error");
+    }
+
+    #[test]
     fn patched_dependencies_is_an_error() {
         let text = format!(
             "{MINIMAL}patchedDependencies:\n  foo@1.0.0:\n    hash: abc\n    path: patches/foo.patch\n"
