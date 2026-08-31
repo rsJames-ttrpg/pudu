@@ -8,4 +8,5 @@ pub mod error;
 pub mod lock;
 pub mod platform;
 pub mod registry;
+pub mod sidecar;
 pub mod tarball;
