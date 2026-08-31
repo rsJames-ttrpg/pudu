@@ -128,3 +128,13 @@ not wrong here, not that a sweep is unnecessary in general (TD-S2-01).
 They also carry no `libc` field and no negation — see the platform matching
 survey §2 for why no public-registry install can produce either. That coverage
 comes from `tests/platform_fuzz.rs` instead.
+
+### Differential fuzz
+
+`tests/platform_fuzz.rs` checks `admits` against pnpm's real `checkPlatform`
+over 3000 generated cases spanning absent, empty, singleton, multi-entry,
+all-negative and mixed lists on all three axes. It is `#[ignore]`d so the
+default suite needs no node.
+
+Last run: **3000 cases, zero disagreements**, against
+`@pnpm/package-is-installable@1000.0.21` on node v24.6.0.
