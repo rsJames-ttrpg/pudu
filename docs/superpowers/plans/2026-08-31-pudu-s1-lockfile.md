@@ -335,7 +335,12 @@ pub struct PeerMeta {
 /// How a package's bytes are obtained. The variant is chosen by which key is
 /// present; an unrecognised shape fails to deserialize.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", untagged, deny_unknown_fields)]
+// Untagged: serde tries each variant and picks the one that fits, so the
+// variant is chosen by which key is present. `deny_unknown_fields` is
+// deliberately absent — it is not meaningful on an untagged enum, and
+// tolerating extra keys matches the rest of these types. A map matching no
+// variant (`{mystery: 1}`) still fails, which is the behaviour wanted.
+#[serde(untagged)]
 pub enum Resolution {
     Integrity { integrity: String },
     Tarball { tarball: String },
