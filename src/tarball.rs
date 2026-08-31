@@ -46,12 +46,8 @@ pub struct Verified {
 /// `Null`, so an absent key and a nonsense key both navigate to `None`.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct Manifest {
-    // `bin` and `directories` are unread until Task 4 implements the real
-    // `resolve_bins`; this task's placeholder does not consult them.
-    #[allow(dead_code)]
     #[serde(default)]
     pub(crate) bin: serde_json::Value,
-    #[allow(dead_code)]
     #[serde(default)]
     pub(crate) directories: serde_json::Value,
     #[serde(default)]
@@ -227,14 +223,155 @@ fn has_install_script(archive: &Archive) -> bool {
             .any(|e| e == "binding.gyp" || e.starts_with(".hooks/"))
 }
 
-/// Placeholder until Task 4 implements the real rules.
+/// `@pnpm/package-bins`, reproduced. Survey §3.
+///
+/// A `bin` field takes precedence over `directories.bin` even when it yields
+/// nothing — pnpm's `if (manifest.bin)` branch is already taken by then, so
+/// there is no fallback. The branch is a JavaScript truthiness test, so
+/// `null`, `false`, and `""` fall through to `directories.bin` while `42` and
+/// `[]` do not.
 fn resolve_bins(
-    _key: &str,
-    _name: &str,
-    _archive: &Archive,
-    _warnings: &mut Vec<VendorWarning>,
+    key: &str,
+    name: &str,
+    archive: &Archive,
+    warnings: &mut Vec<VendorWarning>,
 ) -> BTreeMap<String, String> {
-    BTreeMap::new()
+    let mut out = BTreeMap::new();
+
+    match &archive.manifest.bin {
+        serde_json::Value::String(path) if !path.is_empty() => {
+            insert_bin(key, command_name(name), path, &mut out, warnings);
+        }
+        serde_json::Value::Object(map) => {
+            for (raw, value) in map {
+                match value.as_str() {
+                    Some(path) => insert_bin(key, command_name(raw), path, &mut out, warnings),
+                    None => warnings.push(VendorWarning::NonStringBinValue {
+                        key: key.to_string(),
+                        name: raw.clone(),
+                    }),
+                }
+            }
+        }
+        // Present but unusable. pnpm's `if (manifest.bin)` branch is already
+        // taken, so there is no fall back to `directories.bin`.
+        serde_json::Value::Bool(true)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::Array(_) => {}
+        // Absent, or falsy in JavaScript's sense (`null`, `false`, `""`),
+        // which is what `if (manifest.bin)` actually tests.
+        _ => {
+            if let Some(dir) = archive
+                .manifest
+                .directories
+                .get("bin")
+                .and_then(serde_json::Value::as_str)
+                && let Some(normalized) = contained_path(dir)
+            {
+                let prefix = format!("{normalized}/");
+                // `archive.entries` is sorted, so "last wins" on a collision
+                // is deterministic rather than dependent on archive order.
+                for entry in &archive.entries {
+                    if let Some(rest) = entry.strip_prefix(&prefix) {
+                        let base = rest.rsplit('/').next().unwrap_or(rest);
+                        insert_named(key, base, entry, &mut out, warnings);
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// `@scope/tool` → `tool`; `tool` → `tool`.
+///
+/// pnpm slices from `indexOf('/') + 1`, which for a name with no slash is
+/// `slice(0)` — the whole string.
+fn command_name(raw: &str) -> &str {
+    if raw.starts_with('@') {
+        raw.split_once('/').map_or(raw, |(_, rest)| rest)
+    } else {
+        raw
+    }
+}
+
+/// Whether `s` survives pnpm's `binName !== encodeURIComponent(binName)`
+/// check: the unreserved set `encodeURIComponent` leaves alone.
+///
+/// An empty name passes, exactly as it does in JavaScript.
+fn is_url_safe(s: &str) -> bool {
+    s.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')')
+    })
+}
+
+/// Normalize a package-relative path, returning `None` when it escapes the
+/// package root.
+///
+/// A leading `/` is *not* an escape: pnpm joins onto the package path, so
+/// `/etc/passwd` lands inside the package and `is-subdir` accepts it.
+fn contained_path(rel: &str) -> Option<String> {
+    let mut out: Vec<&str> = Vec::new();
+    for part in rel.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                out.pop()?;
+            }
+            p => out.push(p),
+        }
+    }
+    (!out.is_empty()).then(|| out.join("/"))
+}
+
+fn insert_bin(
+    key: &str,
+    name: &str,
+    path: &str,
+    out: &mut BTreeMap<String, String>,
+    warnings: &mut Vec<VendorWarning>,
+) {
+    if !is_url_safe(name) && name != "$" {
+        warnings.push(VendorWarning::BinNameRejected {
+            key: key.to_string(),
+            name: name.to_string(),
+        });
+        return;
+    }
+    let Some(normalized) = contained_path(path) else {
+        warnings.push(VendorWarning::BinPathEscapes {
+            key: key.to_string(),
+            name: name.to_string(),
+            path: path.to_string(),
+        });
+        return;
+    };
+    if out.insert(name.to_string(), normalized).is_some() {
+        warnings.push(VendorWarning::BinNameCollision {
+            key: key.to_string(),
+            name: name.to_string(),
+        });
+    }
+}
+
+/// The `directories.bin` path: the name comes from the filesystem, so the
+/// URL-safe and containment checks that guard a manifest-declared name do
+/// not apply — the entry is already inside the archive.
+fn insert_named(
+    key: &str,
+    name: &str,
+    path: &str,
+    out: &mut BTreeMap<String, String>,
+    warnings: &mut Vec<VendorWarning>,
+) {
+    if out.insert(name.to_string(), path.to_string()).is_some() {
+        warnings.push(VendorWarning::BinNameCollision {
+            key: key.to_string(),
+            name: name.to_string(),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -441,5 +578,245 @@ mod tests {
         // pnpm's regex is `^\.hooks[\\/]`, so the separator is required.
         let v = inspect(&[("package.json", r#"{"name":"p"}"#), (".hooksrc", "{}")]);
         assert!(!v.inspection.has_install_script);
+    }
+
+    // --- resolve_bins -------------------------------------------------
+
+    fn bins(files: &[(&str, &str)], name: &str) -> BTreeMap<String, String> {
+        let bytes = tarball(files);
+        let i = integrity_of(&bytes);
+        verify_and_inspect("p@1.0.0", name, URL, &bytes, &i)
+            .unwrap()
+            .0
+            .inspection
+            .bin
+    }
+
+    fn bins_with_warnings(
+        files: &[(&str, &str)],
+        name: &str,
+    ) -> (BTreeMap<String, String>, Vec<VendorWarning>) {
+        let bytes = tarball(files);
+        let i = integrity_of(&bytes);
+        let (v, w) = verify_and_inspect("p@1.0.0", name, URL, &bytes, &i).unwrap();
+        (v.inspection.bin, w)
+    }
+
+    #[test]
+    fn no_bin_field_yields_no_commands() {
+        assert!(bins(&[("package.json", r#"{"name":"p"}"#)], "p").is_empty());
+    }
+
+    #[test]
+    fn a_string_bin_is_named_after_the_package() {
+        let b = bins(&[("package.json", r#"{"name":"p","bin":"cli.js"}"#)], "p");
+        assert_eq!(b, BTreeMap::from([("p".to_string(), "cli.js".to_string())]));
+    }
+
+    #[test]
+    fn a_string_bin_on_a_scoped_package_drops_the_scope() {
+        // @babel/parser is the live instance: its command is `parser`.
+        let b = bins(
+            &[(
+                "package.json",
+                r#"{"name":"@babel/parser","bin":"./bin/babel-parser.js"}"#,
+            )],
+            "@babel/parser",
+        );
+        assert_eq!(
+            b,
+            BTreeMap::from([("parser".to_string(), "bin/babel-parser.js".to_string())]),
+            "the scope is stripped from the command and `./` from the path"
+        );
+    }
+
+    #[test]
+    fn an_object_bin_keeps_every_key() {
+        let b = bins(
+            &[(
+                "package.json",
+                r#"{"name":"p","bin":{"one":"a.js","two":"b/c.js"}}"#,
+            )],
+            "p",
+        );
+        assert_eq!(
+            b,
+            BTreeMap::from([
+                ("one".to_string(), "a.js".to_string()),
+                ("two".to_string(), "b/c.js".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn an_object_bin_key_is_scope_stripped_too() {
+        let b = bins(
+            &[(
+                "package.json",
+                r#"{"name":"p","bin":{"@scope/tool":"t.js"}}"#,
+            )],
+            "p",
+        );
+        assert_eq!(
+            b,
+            BTreeMap::from([("tool".to_string(), "t.js".to_string())])
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_not_url_safe_is_dropped_with_a_warning() {
+        let (b, w) = bins_with_warnings(
+            &[(
+                "package.json",
+                r#"{"name":"p","bin":{"a b":"x.js","ok":"y.js"}}"#,
+            )],
+            "p",
+        );
+        assert_eq!(b, BTreeMap::from([("ok".to_string(), "y.js".to_string())]));
+        assert!(
+            w.iter()
+                .any(|x| matches!(x, VendorWarning::BinNameRejected { name, .. } if name == "a b")),
+            "{w:?}"
+        );
+    }
+
+    #[test]
+    fn the_dollar_name_is_exempt_from_the_url_safe_rule() {
+        let b = bins(
+            &[("package.json", r#"{"name":"p","bin":{"$":"x.js"}}"#)],
+            "p",
+        );
+        assert_eq!(b, BTreeMap::from([("$".to_string(), "x.js".to_string())]));
+    }
+
+    #[test]
+    fn a_path_escaping_the_package_is_dropped_with_a_warning() {
+        let (b, w) = bins_with_warnings(
+            &[(
+                "package.json",
+                r#"{"name":"p","bin":{"evil":"../../../etc/passwd","ok":"y.js"}}"#,
+            )],
+            "p",
+        );
+        assert_eq!(b, BTreeMap::from([("ok".to_string(), "y.js".to_string())]));
+        assert!(
+            w.iter()
+                .any(|x| matches!(x, VendorWarning::BinPathEscapes { name, .. } if name == "evil")),
+            "{w:?}"
+        );
+    }
+
+    #[test]
+    fn a_path_that_climbs_then_returns_stays_inside() {
+        let b = bins(
+            &[(
+                "package.json",
+                r#"{"name":"p","bin":{"ok":"lib/../cli.js"}}"#,
+            )],
+            "p",
+        );
+        assert_eq!(
+            b,
+            BTreeMap::from([("ok".to_string(), "cli.js".to_string())])
+        );
+    }
+
+    #[test]
+    fn a_non_string_bin_value_is_dropped_with_a_warning() {
+        let (b, w) = bins_with_warnings(
+            &[(
+                "package.json",
+                r#"{"name":"p","bin":{"bad":42,"ok":"y.js"}}"#,
+            )],
+            "p",
+        );
+        assert_eq!(b, BTreeMap::from([("ok".to_string(), "y.js".to_string())]));
+        assert!(
+            w.iter().any(
+                |x| matches!(x, VendorWarning::NonStringBinValue { name, .. } if name == "bad")
+            ),
+            "{w:?}"
+        );
+    }
+
+    #[test]
+    fn a_bin_field_that_is_neither_string_nor_object_yields_nothing() {
+        // pnpm's `Object.entries(42)` is `[]`, and it does not fall back to
+        // directories.bin — the `if (manifest.bin)` branch is already taken.
+        let b = bins(
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"p","bin":42,"directories":{"bin":"tools"}}"#,
+                ),
+                ("tools/t.js", ""),
+            ],
+            "p",
+        );
+        assert!(b.is_empty(), "{b:?}");
+    }
+
+    #[test]
+    fn directories_bin_is_walked_recursively_and_keyed_on_basename() {
+        let b = bins(
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"p","directories":{"bin":"tools"}}"#,
+                ),
+                ("tools/one.js", ""),
+                ("tools/nested/two.js", ""),
+            ],
+            "p",
+        );
+        assert_eq!(
+            b,
+            BTreeMap::from([
+                ("one.js".to_string(), "tools/one.js".to_string()),
+                ("two.js".to_string(), "tools/nested/two.js".to_string()),
+            ]),
+            "nested files collapse to bare basenames"
+        );
+    }
+
+    #[test]
+    fn directories_bin_is_ignored_when_bin_is_present() {
+        let b = bins(
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"p","bin":"cli.js","directories":{"bin":"tools"}}"#,
+                ),
+                ("tools/t.js", ""),
+            ],
+            "p",
+        );
+        assert_eq!(b, BTreeMap::from([("p".to_string(), "cli.js".to_string())]));
+    }
+
+    #[test]
+    fn a_bin_name_collision_keeps_the_last_and_warns() {
+        let (b, w) = bins_with_warnings(
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"p","directories":{"bin":"tools"}}"#,
+                ),
+                ("tools/a/dup.js", "first"),
+                ("tools/b/dup.js", "second"),
+            ],
+            "p",
+        );
+        assert_eq!(
+            b,
+            BTreeMap::from([("dup.js".to_string(), "tools/b/dup.js".to_string())]),
+            "entries are visited in sorted order, so the last one wins deterministically"
+        );
+        assert!(
+            w.iter().any(
+                |x| matches!(x, VendorWarning::BinNameCollision { name, .. } if name == "dup.js")
+            ),
+            "{w:?}"
+        );
     }
 }
