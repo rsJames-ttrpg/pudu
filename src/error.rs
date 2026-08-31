@@ -878,27 +878,36 @@ mod tests {
         let msg = w.to_string();
         assert!(msg.contains("@esbuild/aix-ppc64@0.25.12"), "{msg}");
         assert!(msg.contains("@esbuild/sunos-x64@0.25.12"), "{msg}");
-        assert!(msg.contains('2'), "states how many: {msg}");
+        assert!(msg.contains("2 package(s)"), "states how many: {msg}");
     }
 
     #[test]
     fn platform_warnings_render_at_warning_severity_with_a_code() {
-        for w in [
-            PlatformWarning::RequiredDependencyExcluded {
-                dependent: "a@1".into(),
-                target: "b@2".into(),
-                platform: "p".into(),
-            },
-            PlatformWarning::ExcludedEverywhere {
-                packages: vec!["b@2".into()],
-                platforms: vec!["p".into()],
-            },
-        ] {
-            assert_eq!(w.severity(), Some(miette::Severity::Warning));
-            assert!(w.code().is_some(), "every diagnostic carries a code");
-            // `render` is the single definition of what a diagnostic looks
-            // like; a warning must survive it without losing its message.
-            assert!(render(&w).contains(&w.to_string().lines().next().unwrap().to_string()));
-        }
+        let w1 = PlatformWarning::RequiredDependencyExcluded {
+            dependent: "a@1".into(),
+            target: "b@2".into(),
+            platform: "p".into(),
+        };
+        assert_eq!(w1.severity(), Some(miette::Severity::Warning));
+        assert!(w1.code().is_some(), "every diagnostic carries a code");
+        let out1 = render(&w1);
+        assert!(
+            out1.contains("pudu::platform::required_dependency_excluded"),
+            "{out1}"
+        );
+        assert!(out1.contains("fixup"), "{out1}");
+
+        let w2 = PlatformWarning::ExcludedEverywhere {
+            packages: vec!["b@2".into()],
+            platforms: vec!["p".into()],
+        };
+        assert_eq!(w2.severity(), Some(miette::Severity::Warning));
+        assert!(w2.code().is_some(), "every diagnostic carries a code");
+        let out2 = render(&w2);
+        assert!(
+            out2.contains("pudu::platform::excluded_everywhere"),
+            "{out2}"
+        );
+        assert!(out2.contains("generated target"), "{out2}");
     }
 }
