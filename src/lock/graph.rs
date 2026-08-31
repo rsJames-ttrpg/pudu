@@ -86,21 +86,15 @@ pub fn resolve_edge(link_name: &str, value: &str) -> String {
     }
 }
 
+/// The value with any peer suffix removed — everything from the first `(`
+/// onward. A plain left-to-right search suffices: the *first* `(` in the
+/// string is always the depth-0 one (any nested `(` can only occur after it),
+/// so there is no need to track paren depth here.
 fn strip_peer_suffix(s: &str) -> &str {
-    let mut depth = 0usize;
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' => {
-                if depth == 0 {
-                    return &s[..i];
-                }
-                depth += 1;
-            }
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
+    match s.find('(') {
+        Some(i) => &s[..i],
+        None => s,
     }
-    s
 }
 
 /// True for a specifier that points at another importer rather than a package.
@@ -140,6 +134,21 @@ impl Graph {
                 });
             }
             by_target.insert(target_name.clone(), raw_key.clone());
+
+            // A link name naming one `node_modules/` slot cannot legally
+            // appear in both `dependencies` and `optionalDependencies` — pnpm
+            // never emits that. Reject rather than merge or let one silently
+            // shadow the other.
+            if let Some(link_name) = entry
+                .dependencies
+                .keys()
+                .find(|k| entry.optional_dependencies.contains_key(*k))
+            {
+                return Err(LockError::DuplicateLinkName {
+                    snapshot: raw_key.clone(),
+                    link_name: link_name.clone(),
+                });
+            }
 
             let mut edges: Vec<Edge> = entry
                 .dependencies
@@ -532,5 +541,54 @@ snapshots:
             .map(|e| e.link_name.as_str())
             .collect();
         assert_eq!(names, vec!["m", "z"], "deterministic order");
+    }
+
+    #[test]
+    fn duplicate_link_name_across_dependencies_and_optional_is_an_error() {
+        let (lf, _) = parse_lockfile(
+            r#"
+lockfileVersion: '9.0'
+importers: {}
+packages:
+  a@1.0.0: {resolution: {integrity: sha512-a}}
+  b@1.0.0: {resolution: {integrity: sha512-b}}
+snapshots:
+  a@1.0.0:
+    dependencies: {b: 1.0.0}
+    optionalDependencies: {b: 1.0.0}
+  b@1.0.0: {}
+"#,
+            Path::new("/x"),
+        )
+        .unwrap();
+        let e = Graph::build(&lf).unwrap_err();
+        assert!(
+            matches!(e, LockError::DuplicateLinkName { .. }),
+            "expected a DuplicateLinkName, got {e:?}"
+        );
+        let m = format!("{e}");
+        assert!(m.contains("a@1.0.0") && m.contains('b'), "{m}");
+    }
+
+    /// Regression coverage for the three shapes verified by hand in review:
+    /// a future edit to `resolve_edge` is most likely to break these
+    /// silently, since none was previously asserted directly.
+    #[test]
+    fn resolve_edge_handles_scoped_and_peer_shapes() {
+        assert_eq!(
+            resolve_edge("foo", "@scope/bar@1.0.0"),
+            "@scope/bar@1.0.0",
+            "a scoped alias target is used verbatim"
+        );
+        assert_eq!(
+            resolve_edge("@scope/foo", "1.0.0"),
+            "@scope/foo@1.0.0",
+            "a scoped link name with a bare version still concatenates"
+        );
+        assert_eq!(
+            resolve_edge("foo", "1.0.0(bar@2.0.0)"),
+            "foo@1.0.0(bar@2.0.0)",
+            "an '@' inside the peer suffix must not be mistaken for an alias"
+        );
     }
 }

@@ -314,6 +314,13 @@ pub enum LockError {
         target: String,
     },
 
+    #[error("`{snapshot}` lists `{link_name}` in both `dependencies` and `optionalDependencies`")]
+    #[diagnostic(
+        code(pudu::lock::duplicate_link_name),
+        help("The lockfile is inconsistent. Re-run `pnpm install` to regenerate it.")
+    )]
+    DuplicateLinkName { snapshot: String, link_name: String },
+
     #[error("this lockfile uses patchedDependencies, which pudu cannot reproduce")]
     #[diagnostic(
         code(pudu::lock::patched_dependencies),
