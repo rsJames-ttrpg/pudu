@@ -1,5 +1,6 @@
 //! Reading `pnpm-lock.yaml` v9.
 
+pub mod snapshot_key;
 pub mod types;
 
 use std::path::Path;
@@ -7,6 +8,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::error::{LockError, LockWarning};
+pub use snapshot_key::SnapshotKey;
 pub use types::*;
 
 /// The only lockfile version pudu reads.
