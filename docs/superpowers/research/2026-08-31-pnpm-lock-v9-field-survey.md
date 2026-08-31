@@ -150,3 +150,79 @@ Their absence here means they are untested, not unsupported-by-format.
 `link:`/`workspace:`/`file:` specifiers · git and tarball resolutions ·
 multi-package workspaces beyond two importers · `catalogs:` · `overrides:` ·
 `patchedDependencies:` · dependency cycles · musl `libc` variants.
+
+## Late findings — two that change S1's requirements
+
+### 7. Dependency cycles are universal. The roadmap's "reject cycles" criterion is wrong.
+
+A DFS over the snapshot graph of four real lockfiles:
+
+| lockfile | nodes | cycles |
+|---|---|---|
+| trandox | 740 | 8 |
+| main-currents/frontend | 834 | 9 |
+| yazi.nvim | 517 | 1 |
+| superdesign ext | 517 | 4 |
+
+**Every lockfile has them**, and they sit in the most ordinary packages:
+
+```
+@babel/core@7.28.6  ->  @babel/helper-module-transforms@7.28.6(@babel/core@7.28.6)  ->  @babel/core@7.28.6
+eslint@9.39.2(jiti@2.6.1)  ->  @eslint-community/eslint-utils@4.9.1(eslint@…)  ->  eslint@…
+browserslist@4.28.1  ->  update-browserslist-db@1.2.3(browserslist@4.28.1)  ->  browserslist@4.28.1
+es-abstract@1.24.1  ->  string.prototype.trim@1.2.10  ->  es-abstract@1.24.1
+```
+
+Roadmap S1 lists a fixture for "cycles (rejected clearly)". **Rejecting cycles
+would reject essentially every real project**, including any that uses Babel,
+ESLint, or Browserslist. That criterion must be replaced.
+
+Cycles are survivable because of the store design already chosen in §8: the
+virtual store is **one `filegroup` mapping paths to tarball artifacts**, and a
+package's extracted content never depends on its dependents' targets. The
+cycle lives in the symlink wiring, which is data inside one target, not in the
+Buck target graph. pnpm itself works the same way.
+
+The consequence is a constraint on S4 rather than a defect in S1: **the store
+cannot be decomposed into one Buck target per package that depends on its
+dependencies' targets** — that shape would reintroduce the cycle as a Buck
+target cycle and fail to load. If S4 ever splits the single `filegroup` for
+incrementality (design §12 floats this as the scale fallback), it must split
+along tarball-extraction lines, which are acyclic, never along dependency
+edges.
+
+S1 should therefore *detect* cycles and expose them as a diagnostic — they are
+worth reporting, and the detector is needed to prove the acyclic-extraction
+claim — but must not treat them as an error.
+
+### 8. Dependency edge values are not always bare versions — npm aliases appear.
+
+```yaml
+'@isaacs/cliui@8.0.2':
+  dependencies:
+    string-width: 5.1.2                    # bare version
+    string-width-cjs: string-width@4.2.3   # ALIAS: name@version
+    strip-ansi-cjs: strip-ansi@6.0.1
+    wrap-ansi-cjs: wrap-ansi@7.0.0
+```
+
+This is npm's alias syntax (`"string-width-cjs": "npm:string-width@^4.2.0"`).
+The map key is the **link name** — the directory created under
+`node_modules/` — while the value names a *different* package. The naive rule
+`key = name + "@" + value` yields `string-width-cjs@string-width@4.2.3`, which
+matches no entry; the correct key is `string-width@4.2.3`, which does exist in
+both `packages:` and `snapshots:`.
+
+Only 3 distinct aliased edges appear, but they occur in **4 of the 8
+substantive v9 lockfiles** — all via `@isaacs/cliui`, a transitive dependency
+of `glob` and `rimraf`. A parser that gets this wrong fails on roughly half of
+all real projects.
+
+**Rule.** Strip any peer suffix from the value; if what remains still contains
+an `@` beyond position 0, the value is already a complete `name@version` key
+and the map key is only a link name. Otherwise the value is a bare version and
+the key is `name@value`.
+
+**Link name ≠ package name is therefore a property S1 must model on the
+edge**, not a detail S4 can reconstruct: the virtual store must symlink the
+package's content in under the *alias*, so the edge carries both.
