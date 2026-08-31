@@ -14,6 +14,8 @@
 
 use std::fmt;
 
+use sha2::{Digest, Sha256};
+
 /// Maximum peer-nesting depth. Real lockfiles nest three levels; 64 is
 /// generous headroom. Without a cap, parsing is superlinear in nesting depth
 /// (measured: ~4s at 4000 levels, no return within two minutes at 100,000) —
@@ -140,6 +142,70 @@ impl SnapshotKey {
         }
         out
     }
+
+    /// The Buck target name for this key. See [`target_name`].
+    pub fn target_name(&self) -> String {
+        target_name(&self.canonical())
+    }
+}
+
+/// pnpm's `virtual-store-dir-max-length` default.
+///
+/// Hardcoded for v0.1.0. A project that has changed the pnpm setting gets
+/// names that do not match its own store — cosmetic only, since the names
+/// stay internally consistent.
+pub const MAX_LEN_WITHOUT_HASH: usize = 120;
+
+/// Characters pnpm escapes to `+`: the Windows-illegal set plus `#`.
+const ILLEGAL: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|', '#'];
+
+/// The Buck target name for a snapshot key.
+///
+/// A direct port of `depPathToFilename` from `@pnpm/dependency-path`
+/// v1001.1.10, so generated names are byte-identical to the directory names
+/// in a real `node_modules/.pnpm/`. Verified against 1363 real directories;
+/// see the field survey. **Do not "improve" this** — any deviation breaks
+/// greppability against the real store, which is the whole point.
+pub fn target_name(dep_path: &str) -> String {
+    // pnpm strips a leading '/' (a legacy v5 dep-path form) before escaping.
+    let s = dep_path.strip_prefix('/').unwrap_or(dep_path);
+    let mut filename: String = s
+        .chars()
+        .map(|c| if ILLEGAL.contains(&c) { '+' } else { c })
+        .collect();
+
+    if filename.contains('(') {
+        // Order matters: drop the trailing ')' first, so `)(` -> `_` does not
+        // have to account for it.
+        if let Some(stripped) = filename.strip_suffix(')') {
+            filename = stripped.to_string();
+        }
+        filename = filename.replace(")(", "_").replace(['(', ')'], "_");
+    }
+
+    // Uppercase forces the hash regardless of length: a case-insensitive
+    // filesystem would otherwise collapse two distinct packages.
+    let needs_hash = filename.len() > MAX_LEN_WITHOUT_HASH
+        || (filename != filename.to_lowercase() && !filename.starts_with("file+"));
+
+    if needs_hash {
+        let digest = format!("{:x}", Sha256::digest(filename.as_bytes()));
+        let keep = MAX_LEN_WITHOUT_HASH - 33;
+        // Truncate on a char boundary. Package names are ASCII in practice,
+        // but a non-ASCII name must not panic.
+        let stem = if filename.len() > keep {
+            let mut end = keep;
+            while !filename.is_char_boundary(end) {
+                end -= 1;
+            }
+            &filename[..end]
+        } else {
+            &filename[..]
+        };
+        return format!("{stem}_{}", &digest[..32]);
+    }
+
+    filename
 }
 
 impl fmt::Display for SnapshotKey {
@@ -435,5 +501,103 @@ mod tests {
             elapsed < std::time::Duration::from_millis(50),
             "must reject in well under 50ms, took {elapsed:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod target_name_tests {
+    use super::*;
+
+    #[test]
+    fn plain_name_is_unchanged() {
+        assert_eq!(target_name("svelte@5.49.1"), "svelte@5.49.1");
+    }
+
+    #[test]
+    fn scope_slash_becomes_plus() {
+        assert_eq!(target_name("@babel/core@7.28.6"), "@babel+core@7.28.6");
+    }
+
+    #[test]
+    fn escapes_every_illegal_path_character() {
+        // The full set, not just '/'.
+        for (raw, want) in [
+            ("a/b@1.0.0", "a+b@1.0.0"),
+            ("a:b@1.0.0", "a+b@1.0.0"),
+            ("a*b@1.0.0", "a+b@1.0.0"),
+            ("a?b@1.0.0", "a+b@1.0.0"),
+            ("a<b@1.0.0", "a+b@1.0.0"),
+            ("a>b@1.0.0", "a+b@1.0.0"),
+            ("a|b@1.0.0", "a+b@1.0.0"),
+            ("a#b@1.0.0", "a+b@1.0.0"),
+        ] {
+            assert_eq!(target_name(raw), want, "escaping {raw}");
+        }
+    }
+
+    #[test]
+    fn short_peer_sets_flatten_readably_without_hashing() {
+        assert_eq!(
+            target_name("vite@7.3.1(@types/node@22.19.7)(terser@5.46.0)"),
+            "vite@7.3.1_@types+node@22.19.7_terser@5.46.0",
+            "short peers must stay readable, not be hashed"
+        );
+        assert_eq!(
+            target_name("react-dom@18.3.1(react@18.3.1)"),
+            "react-dom@18.3.1_react@18.3.1"
+        );
+    }
+
+    #[test]
+    fn uppercase_forces_the_hash_path_even_when_short() {
+        let got = target_name("MyPkg@1.0.0");
+        assert!(got.starts_with("MyPkg@1.0.0_"), "keeps the stem: {got}");
+        assert_eq!(
+            got.len(),
+            "MyPkg@1.0.0".len() + 33,
+            "stem + '_' + 32 hex: {got}"
+        );
+        assert_ne!(got, "MyPkg@1.0.0", "must not pass through unhashed");
+    }
+
+    #[test]
+    fn long_names_are_truncated_to_exactly_120() {
+        let long = "@sveltejs/kit@2.50.1(@sveltejs/vite-plugin-svelte@6.2.4(svelte@5.49.1)(vite@7.3.1(@types/node@22.19.7)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.46.0)))(svelte@5.49.1)(vite@7.3.1(@types/node@22.19.7)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.46.0))";
+        let got = target_name(long);
+        assert_eq!(got.len(), 120, "pnpm's max length: {got}");
+        assert!(
+            got.starts_with("@sveltejs+kit@2.50.1_"),
+            "readable stem survives: {got}"
+        );
+        let hash = &got[got.len() - 32..];
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "hex tail: {hash}"
+        );
+        assert_eq!(got.as_bytes()[got.len() - 33], b'_');
+    }
+
+    #[test]
+    fn hash_is_sha256_of_the_flattened_name_truncated_to_32() {
+        use sha2::{Digest, Sha256};
+        let flat = "MyPkg@1.0.0";
+        let want = format!("{:x}", Sha256::digest(flat.as_bytes()));
+        assert_eq!(target_name(flat), format!("{flat}_{}", &want[..32]));
+    }
+
+    #[test]
+    fn peer_order_changes_the_name() {
+        assert_ne!(
+            target_name("x@1.0.0(a@1.0.0)(b@2.0.0)"),
+            target_name("x@1.0.0(b@2.0.0)(a@1.0.0)"),
+            "peers are not sorted, so order is significant"
+        );
+    }
+
+    #[test]
+    fn snapshot_key_method_agrees_with_the_free_function() {
+        let raw = "eslint-plugin-svelte@3.14.0(eslint@9.39.2(jiti@2.6.1))(svelte@5.49.1)";
+        let k = SnapshotKey::parse(raw).unwrap();
+        assert_eq!(k.target_name(), target_name(raw));
     }
 }
