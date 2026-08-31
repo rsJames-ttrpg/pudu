@@ -357,6 +357,48 @@ pub enum LockWarning {
     DeprecatedPackage { key: String, message: String },
 }
 
+// --- Platform pruning (S2) ------------------------------------------------
+
+/// Non-fatal findings from per-platform pruning.
+///
+/// S2 introduces no hard errors: every condition here is a property of
+/// somebody's dependency tree rather than of pudu's input being malformed,
+/// and none of them makes the rest of the output wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
+pub enum PlatformWarning {
+    #[error("`{dependent}` requires `{target}`, which is excluded on platform `{platform}`")]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::platform::required_dependency_excluded),
+        help(
+            "pudu drops the dependency for this platform. pnpm would install it anyway; if the package is genuinely needed here, it may need a fixup."
+        )
+    )]
+    RequiredDependencyExcluded {
+        dependent: String,
+        target: String,
+        platform: String,
+    },
+
+    #[error(
+        "{} package(s) are excluded on every configured platform ({}): {}",
+        packages.len(),
+        platforms.join(", "),
+        packages.join(", ")
+    )]
+    #[diagnostic(
+        severity(Warning),
+        code(pudu::platform::excluded_everywhere),
+        help(
+            "these packages appear in no generated target. That is expected for the platform-specific binaries of a package like `esbuild`, and worth checking for anything else."
+        )
+    )]
+    ExcludedEverywhere {
+        packages: Vec<String>,
+        platforms: Vec<String>,
+    },
+}
+
 // --- Platform derivation (pudu init) -------------------------------------
 
 /// Non-fatal findings from `pudu init`'s `supportedArchitectures` expansion.
@@ -806,5 +848,57 @@ mod tests {
             covered, REGISTERED_ERRORS,
             "every type in the `typed_errors!` registry needs a sample above"
         );
+    }
+
+    #[test]
+    fn required_dependency_excluded_names_all_three_parties() {
+        let w = PlatformWarning::RequiredDependencyExcluded {
+            dependent: "my-app@1.0.0".into(),
+            target: "fsevents@2.3.3".into(),
+            platform: "linux-x64-gnu".into(),
+        };
+        let msg = w.to_string();
+        assert!(msg.contains("my-app@1.0.0"), "names the dependent: {msg}");
+        assert!(msg.contains("fsevents@2.3.3"), "names the target: {msg}");
+        assert!(msg.contains("linux-x64-gnu"), "names the platform: {msg}");
+    }
+
+    /// Fires once for the whole set, not once per package: on the committed
+    /// fixture a per-package warning would print ~60 times and train the
+    /// user to ignore warnings.
+    #[test]
+    fn excluded_everywhere_aggregates_into_one_message() {
+        let w = PlatformWarning::ExcludedEverywhere {
+            packages: vec![
+                "@esbuild/aix-ppc64@0.25.12".into(),
+                "@esbuild/sunos-x64@0.25.12".into(),
+            ],
+            platforms: vec!["linux-x64-gnu".into(), "darwin-arm64".into()],
+        };
+        let msg = w.to_string();
+        assert!(msg.contains("@esbuild/aix-ppc64@0.25.12"), "{msg}");
+        assert!(msg.contains("@esbuild/sunos-x64@0.25.12"), "{msg}");
+        assert!(msg.contains('2'), "states how many: {msg}");
+    }
+
+    #[test]
+    fn platform_warnings_render_at_warning_severity_with_a_code() {
+        for w in [
+            PlatformWarning::RequiredDependencyExcluded {
+                dependent: "a@1".into(),
+                target: "b@2".into(),
+                platform: "p".into(),
+            },
+            PlatformWarning::ExcludedEverywhere {
+                packages: vec!["b@2".into()],
+                platforms: vec!["p".into()],
+            },
+        ] {
+            assert_eq!(w.severity(), Some(miette::Severity::Warning));
+            assert!(w.code().is_some(), "every diagnostic carries a code");
+            // `render` is the single definition of what a diagnostic looks
+            // like; a warning must survive it without losing its message.
+            assert!(render(&w).contains(&w.to_string().lines().next().unwrap().to_string()));
+        }
     }
 }
