@@ -51,17 +51,23 @@ Also corrected: the plan wrongly asserted `serde_json` was already a dependency,
 
 **Scope:** Parse lockfile v9 into typed structures — `importers`, `packages`, `snapshots`. The snapshot-key grammar including peer suffixes. Target-name mangling. Instance graph construction. Reject unknown `lockfileVersion` loudly.
 
-This stage also **verifies the design's lockfile assumptions** against a corpus of real `pnpm-lock.yaml` files (design §12): whether v9 carries a `requiresBuild` equivalent, how `bundledDependencies` appear, and what `resolution:` variants occur in practice (`tarball`, git, `link:`).
+The design's lockfile assumptions are **verified** — see the
+[v9 field survey](../research/2026-08-31-pnpm-lock-v9-field-survey.md), which
+confirms `requiresBuild` is gone from v9, finds `bundledDependencies` need no
+handling, and turns up three things the design missed: recursively nested peer
+suffixes, 422-character snapshot keys, and npm-aliased dependency edges.
+Stage spec: [S1](2026-08-31-pudu-s1-lockfile-design.md).
 
 **Exit criteria:**
 - A hidden `pudu debug print-graph` reads the lockfile + `pudu.toml` and prints the instance graph as JSON, one entry per snapshot key.
-- Fixtures cover: dev deps, optional deps, peer-dep instances of one package@version, scoped names, workspace importers, `link:` workspace deps, cycles (rejected clearly).
-- Snapshot-key mangling is unit-tested including the >128-char hash path and sort stability.
+- Fixtures cover: dev deps, optional deps, peer-dep instances of one package@version, scoped names, workspace importers, `link:` workspace deps, npm-aliased edges, and cycles.
+- **Cycles are detected and reported, not rejected.** The survey found them in every real lockfile examined (`@babel/core`, `eslint`, `browserslist`); rejecting them would reject nearly every real project. This replaces an earlier "cycles (rejected clearly)" criterion.
+- Snapshot-key mangling is unit-tested including nested peers, the verbatim 422-char corpus key, sort stability, and collision detection.
 - An unsupported `lockfileVersion` errors naming the supported range.
 
 **Demo:** On a real-world lockfile with 500+ packages including peer instances, `pudu debug print-graph` produces a stable JSON snapshot.
 
-**Touches:** `src/lock/`.
+**Touches:** `src/lock/`, `src/cli/debug.rs`.
 
 ---
 
