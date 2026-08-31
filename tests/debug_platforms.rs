@@ -137,6 +137,60 @@ fn reports_the_platform_axes_and_generated_constraints() {
     assert!(mac["libc"].is_null(), "darwin configures no libc");
 }
 
+/// Escape-hatch config: `[platforms.linux-x64-gnu]` sets `constraints =
+/// [...]` explicitly. No fixture anywhere else sets `constraints`, so
+/// `constraints_overridden` was asserted `false` by every other test —
+/// replacing `platform.constraints.is_some()` with the constant `false` in
+/// `debug.rs` passed the whole suite. This exercises the `true` arm too,
+/// and pins that the emitted labels are the user's verbatim list (in their
+/// order), not the generated `prelude//` ones.
+const CONFIG_WITH_OVERRIDE: &str = r#"lockfile_path   = "pnpm-lock.yaml"
+third_party_dir = "third-party/js"
+
+[platforms.linux-x64-gnu]
+os          = "linux"
+cpu         = "x64"
+libc        = "glibc"
+constraints = ["//custom:my-linux-x64", "//custom:extra"]
+
+[platforms.darwin-arm64]
+os  = "darwin"
+cpu = "arm64"
+"#;
+
+#[test]
+fn constraints_overridden_reports_the_escape_hatch_and_its_verbatim_labels() {
+    let dir = project(CONFIG_WITH_OVERRIDE, LOCK);
+    let out = Command::new(env!("CARGO_BIN_EXE_pudu"))
+        .args(["debug", "platforms"])
+        .current_dir(dir.path())
+        .output()
+        .expect("run pudu");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+
+    let lin = &json["platforms"]["linux-x64-gnu"];
+    assert_eq!(lin["constraints_overridden"], true);
+    assert_eq!(
+        lin["constraints"].as_array().unwrap(),
+        &vec![
+            serde_json::json!("//custom:my-linux-x64"),
+            serde_json::json!("//custom:extra"),
+        ],
+        "the user's verbatim order, not generated prelude// labels"
+    );
+
+    let mac = &json["platforms"]["darwin-arm64"];
+    assert_eq!(
+        mac["constraints_overridden"], false,
+        "the other platform sets no override"
+    );
+}
+
 #[test]
 fn an_excluded_optional_dependency_is_not_a_dropped_required_edge() {
     let (json, _) = run();

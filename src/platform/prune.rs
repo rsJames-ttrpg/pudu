@@ -132,7 +132,12 @@ pub fn prune(
         .filter(|k| !platforms_by_node.contains_key(*k))
         .cloned()
         .collect();
-    if !excluded_everywhere.is_empty() {
+    // Guarded on a non-empty platform set: with zero configured platforms,
+    // every package is trivially excluded "everywhere" (there is nowhere
+    // for it to survive), which is a nonsense diagnostic, not a finding.
+    // `debug::load` skips `Config::validate` (spec §6), so an empty
+    // `[platforms]` can reach here in practice.
+    if !excluded_everywhere.is_empty() && !platforms.is_empty() {
         warnings.push(PlatformWarning::ExcludedEverywhere {
             packages: excluded_everywhere,
             platforms: platforms.keys().cloned().collect(),
@@ -417,13 +422,17 @@ mod tests {
         let everywhere: Vec<_> = warnings
             .iter()
             .filter_map(|w| match w {
-                PlatformWarning::ExcludedEverywhere { packages, .. } => Some(packages),
+                PlatformWarning::ExcludedEverywhere {
+                    packages,
+                    platforms,
+                } => Some((packages, platforms)),
                 _ => None,
             })
             .collect();
         assert_eq!(everywhere.len(), 1, "exactly one aggregated warning");
+        let (packages, warned_platforms) = everywhere[0];
         assert_eq!(
-            everywhere[0],
+            packages,
             &vec![
                 "a-win@1.0.0".to_string(),
                 "b-win@1.0.0".to_string(),
@@ -434,6 +443,29 @@ mod tests {
             .into_iter()
             .collect::<Vec<_>>(),
             "sorted, all three, once"
+        );
+        assert_eq!(
+            warned_platforms,
+            &vec!["darwin-arm64".to_string(), "linux-x64-gnu".to_string()],
+            "names every configured platform the packages were excluded on, not an empty list"
+        );
+    }
+
+    #[test]
+    fn no_excluded_everywhere_warning_with_zero_configured_platforms() {
+        // An invalid config (empty [platforms]) flowing straight into
+        // pruning — debug::load skips Config::validate — must not produce
+        // "every package is excluded on every configured platform ()".
+        let g = graph(vec![(
+            "app@1.0.0",
+            node("app", "1.0.0", meta(None, None), vec![]),
+        )]);
+        let (_, warnings) = prune(&g, &BTreeMap::new());
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| matches!(w, PlatformWarning::ExcludedEverywhere { .. })),
+            "zero platforms configured is not a finding about the packages"
         );
     }
 
@@ -455,10 +487,14 @@ mod tests {
         );
     }
 
-    /// Determinism: warnings come out in a stable order regardless of how
-    /// the graph was built, because every collection is a BTree.
+    /// `prune` is a pure function of `(graph, platforms)`: calling it twice
+    /// on the same inputs in one process yields identical output, because
+    /// every collection it builds is a BTree. This does NOT guard against
+    /// an ordering regression across separate process runs — that
+    /// guarantee lives in `tests/debug_platforms.rs`, which actually spawns
+    /// two processes.
     #[test]
-    fn output_is_deterministic_across_runs() {
+    fn prune_is_a_pure_function_of_its_inputs() {
         let g = graph(vec![
             ("app@1.0.0", node("app", "1.0.0", meta(None, None), vec![])),
             (

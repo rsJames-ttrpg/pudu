@@ -846,14 +846,21 @@ mod tests {
     /// TD-S0-09: a non-string entry was dropped in silence.
     #[test]
     fn a_non_string_axis_entry_warns_rather_than_vanishing() {
-        let yaml = "supportedArchitectures:\n  os: [linux]\n  cpu: [123, x64]\n";
+        // Two bad entries (123, 456), not one: with only one bad entry, a
+        // "warn once per axis" bug and a "warn once per bad entry" bug are
+        // indistinguishable — both produce exactly one warning. This pins
+        // "once per axis": `reported` in `axis()` must not fire twice.
+        let yaml = "supportedArchitectures:\n  os: [linux]\n  cpu: [123, 456, x64]\n";
         let d = derive_platforms(Some(yaml)).expect("must not be fatal");
-        assert!(
-            d.warnings.iter().any(|w| matches!(
-                w,
-                DeriveWarning::NonStringAxisEntry { key, .. } if key == "cpu"
-            )),
-            "warnings: {:?}",
+        let cpu_warnings: Vec<_> = d
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, DeriveWarning::NonStringAxisEntry { key, .. } if key == "cpu"))
+            .collect();
+        assert_eq!(
+            cpu_warnings.len(),
+            1,
+            "one mistake, not one per bad entry: {:?}",
             d.warnings
         );
     }
