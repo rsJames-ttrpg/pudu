@@ -211,14 +211,31 @@ pnpm v9 snapshot keys encode peer resolutions in parentheses: `react-dom@18.3.1(
 
 **Design: one Buck target per snapshot key.** Tarball targets stay keyed on `name@version`, so nothing is downloaded twice; only the dep wiring differs per instance.
 
-Target-name mangling mirrors pnpm's own virtual-store convention so generated names stay greppable against a real `node_modules/.pnpm/` directory:
+Target-name mangling is a **direct port of pnpm's own `depPathToFilename`**
+(`@pnpm/dependency-path`), not an invented scheme. Generated Buck target names
+are therefore byte-identical to the directory names in a real
+`node_modules/.pnpm/`, so a target name can be pasted straight into `ls` there.
 
-- `/` → `+` (`@scope/name` → `@scope+name`)
-- `@` → `@` retained; Buck target names permit it
-- peer suffix `(a@1)(b@2)` flattened to `_a@1_b@2`
-- if the mangled name exceeds 128 characters, the peer suffix is replaced by `_peer_<first 12 hex of sha256(suffix)>`, matching pnpm's own long-name hashing behaviour in spirit
+In outline: escape `\ / : * ? " < > | #` to `+`; flatten peer parens to `_`;
+and if the result exceeds 120 characters — or contains any uppercase, which
+guards case-insensitive filesystems — truncate to 87 characters and append
+`_` plus the first 32 hex of its sha256. Short peer sets stay fully readable
+(`vite@7.3.1_terser@5.46.0`); long ones keep a readable stem and a hash tail.
 
-Determinism requires the peer suffix be sorted before hashing; pnpm already emits them sorted, but pudu re-sorts defensively.
+Peers are **not** sorted: pnpm hashes the lockfile's own order, and re-sorting
+would make every hashed name diverge from the real store. Determinism comes
+from the lockfile being deterministic. Two distinct keys mangling to one
+target name is a hard error naming both.
+
+A reimplementation was verified against real virtual stores — 1363 directory
+names reproduced exactly, including 32 of 32 hashed long names (see the
+[v9 field survey](../research/2026-08-31-pnpm-lock-v9-field-survey.md)).
+
+Peer suffixes nest to arbitrary depth
+(`eslint-plugin-svelte@3.14.0(eslint@9.39.2(jiti@2.6.1))(svelte@5.49.1)`), so
+the grammar is recursive and must be parsed with paren-depth tracking. Full
+grammar, the npm-alias edge rule, and the exact naming algorithm:
+[S1 spec](2026-08-31-pudu-s1-lockfile-design.md).
 
 ### Platform pruning
 
@@ -572,7 +589,7 @@ src/
 
 Heaviest coverage on the algorithmically fiddly modules:
 
-- `lock/snapshot_key.rs` — peer-suffix parsing, mangling, the >128-char hash path, sort stability.
+- `lock/snapshot_key.rs` — peer-suffix parsing, mangling, the >120-char hash path, sort stability.
 - `platform.rs` — npm `os`/`cpu`/`libc` matching including negation (`!win32`), constraint-label mapping, conditional-abi logic.
 - `fixup/cfg.rs` — predicate parser + evaluator, version comparison edge cases.
 - `fixup/layer.rs` — merge rule correctness.
@@ -607,12 +624,13 @@ v1 fixtures:
 
 ## 12. Open questions & risks
 
-- **Lockfile v9 field inventory needs verification against real lockfiles.** This spec asserts that v9 dropped `requiresBuild` (present in v5/v6) and that install-script detection therefore requires tarball inspection. S1 must confirm against a corpus of real `pnpm-lock.yaml` files before the §4 design is locked. If v9 does carry an equivalent flag, the tarball inspection stays anyway (for `bin` and sha256) but the error path gets faster.
+- **~~Lockfile v9 field inventory needs verification.~~ Resolved 2026-08-31.** The [v9 field survey](../research/2026-08-31-pnpm-lock-v9-field-survey.md) confirms `requiresBuild` is absent from all 18 v9 lockfiles examined, so §4's mandatory vendor pass stands. `hasBin` did survive into v9 as a bare boolean — not a bin map, but a useful cross-check against the vendor pass.
 - **pnpm lockfile format churn.** v9 has been stable across pnpm 9 and 10, but pnpm moves fast. Mitigation: reject unknown `lockfileVersion` loudly rather than parsing optimistically; CI tests against the min-supported and latest pnpm.
+- **Dependency cycles are universal, and constrain how the store may be split.** Every real lockfile surveyed contains cycles (`@babel/core` ↔ `@babel/helper-module-transforms`, `eslint` ↔ `@eslint-community/eslint-utils`). They are harmless here because the store is one `filegroup` whose cycle lives in symlink data, not in the Buck target graph. But S4 must not decompose the store into one target per package depending on its dependencies' targets — that reintroduces the cycle as a Buck target cycle. A split for scale must follow tarball-extraction lines, which are acyclic.
 - **`filegroup` scale.** A large workspace's store graph could produce a dict with tens of thousands of entries in one `filegroup`. Unknown whether Buck2's `symlinked_dir` handles that comfortably. S4 must measure on a realistic lockfile; if it degrades, the fallback is per-package `filegroup`s composed into a tree.
 - **`.bin` sub-target extraction.** `http_archive` exposes `sub_targets`, but referencing a single file inside the extracted archive for a `.bin` symlink needs confirming — the design assumes `//third-party/js:pkg[bin/foo]` works. S4 validates; fallback is a small genrule per bin entry.
 - **Node's symlink realpath behaviour.** Node resolves `node_modules` symlinks to their real paths by default (`--preserve-symlinks` off). Under Buck, the "real path" is buck-out. pnpm relies on the same behaviour and works, so this should hold, but S4's e2e test is the actual proof.
-- **Bundled dependencies.** Packages using `bundledDependencies` ship deps inside their own tarball. Pudu must not double-install them. Low frequency, but needs an explicit S1 decision.
+- **~~Bundled dependencies.~~ Resolved 2026-08-31.** pnpm already omits bundled names from the snapshot graph — the bundled package's snapshot carries no `dependencies` at all — so they never become edges and there is no double-install risk. Pudu parses the field and ignores it.
 - **Registry URL derivation is a heuristic.** `https://<registry>/<name>/-/<basename>-<version>.tgz` holds for npmjs.org and most mirrors, but private registries (Artifactory, Verdaccio) vary. Mitigation: `pudu.lock` records the resolved URL, so a wrong derivation fails loudly at vendor time and `prefer_tarball` overrides it.
 - **Registry repo location undecided.** `github.com/<user>/pudu-fixups` is a placeholder; the real location is a launch-time decision and blocks nothing before the first public release.
 

@@ -1,0 +1,9 @@
+{
+  "name": "pudu-fixture-root",
+  "version": "0.0.0",
+  "private": true,
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "glob": "10.4.5"
+  }
+}

@@ -4,10 +4,11 @@ expression: text
 ---
 Developer inspection commands
 
-Usage: pudu debug [OPTIONS] [ARGS]...
+Usage: pudu debug [OPTIONS] <COMMAND>
 
-Arguments:
-  [ARGS]...  
+Commands:
+  print-graph  Print the instance graph as JSON
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
   -C <PATH>         Change to this directory before running

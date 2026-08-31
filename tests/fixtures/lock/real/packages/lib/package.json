@@ -1,0 +1,6 @@
+{
+  "name": "@fixture/lib",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": { "browserslist": "4.28.1", "update-browserslist-db": "1.2.3" }
+}
