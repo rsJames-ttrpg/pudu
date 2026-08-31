@@ -589,7 +589,7 @@ src/
 
 Heaviest coverage on the algorithmically fiddly modules:
 
-- `lock/snapshot_key.rs` — peer-suffix parsing, mangling, the >128-char hash path, sort stability.
+- `lock/snapshot_key.rs` — peer-suffix parsing, mangling, the >120-char hash path, sort stability.
 - `platform.rs` — npm `os`/`cpu`/`libc` matching including negation (`!win32`), constraint-label mapping, conditional-abi logic.
 - `fixup/cfg.rs` — predicate parser + evaluator, version comparison edge cases.
 - `fixup/layer.rs` — merge rule correctness.

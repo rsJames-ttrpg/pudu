@@ -107,10 +107,15 @@ pub struct PackageMeta {
 }
 
 pub enum Resolution {
+    // Tarball is declared FIRST and carries an optional integrity, because
+    // untagged serde takes the first variant that fits and ignores extra
+    // keys. A private-registry entry is `{integrity: …, tarball: …}`; with
+    // Integrity first it matched that variant and the tarball URL was
+    // silently dropped — the field S3 fetches from.
+    Tarball   { tarball: String, integrity: Option<String> },
     Integrity { integrity: String },        // sha512-<base64>
-    Tarball   { tarball: String },
-    Directory { directory: String },
     Git       { repo: String, commit: String },
+    Directory { directory: String, kind: String },  // `type:` in YAML
 }
 
 pub struct SnapshotEntry {
@@ -127,8 +132,12 @@ on an unknown platform token; S2 interprets these strings and prunes, and an
 unrecognised token simply matches no configured platform.
 
 `Resolution` is an untagged-by-key enum: the variant is chosen by which key
-is present. A `resolution:` map with none of the four known keys is an error
-naming the keys it did carry (§9).
+is present, in declaration order. A `resolution:` map matching no variant is
+a serde error naming the package and the line — for example
+`packages.a@1.0.0: data did not match any variant of untagged enum
+Resolution at line 5 column 5`. It does **not** enumerate the keys that were
+present; an earlier draft specified an `UnknownResolution` variant for that
+and it was not built, because the serde message already locates the problem.
 
 **Unknown fields are tolerated.** No `deny_unknown_fields` on these structs —
 pnpm adds fields between minor releases, and failing on one pudu does not read
@@ -296,9 +305,13 @@ pub struct Graph {
 }
 
 pub struct Node {
-    pub key: SnapshotKey,
+    // The key is flattened rather than nested, so the JSON in §10 is one
+    // level shallower and greppable.
+    pub name: String,
+    pub version: String,
+    pub peers: Vec<String>,         // canonical form, lockfile order
     pub target_name: String,
-    pub meta: PackageMeta,          // resolved via key.base()
+    pub meta: PackageMeta,          // resolved via the key's base()
     pub edges: Vec<Edge>,           // sorted by link_name
     pub optional: bool,
 }
@@ -312,7 +325,10 @@ pub struct Edge {
 pub struct Root {
     pub importer: String,           // "." or "packages/server"
     pub link_name: String,
-    pub target: String,
+    // None for link:/file:/workspace: roots, which name another importer
+    // rather than a package (§6.3).
+    pub target: Option<String>,
+    pub specifier: String,          // the range as written
     pub kind: RootKind,             // Prod | Dev | Optional
 }
 ```
@@ -443,11 +459,11 @@ where meaningful, the link name) rather than only a line number.
 ```rust
 pub enum LockError {
     UnsupportedVersion { found: Option<String> },
-    Yaml { source: serde_norway::Error },
-    KeyParse { key: String, offset: usize, reason: KeyParseError },
+    Yaml { path: PathBuf, source: serde_norway::Error },
+    KeyParse { key: String, offset: usize, reason: String },
     MissingPackageMeta { snapshot: String, base: String },
     UnresolvedEdge { from: String, link_name: String, resolved: String },
-    UnknownResolution { key: String, found_keys: Vec<String> },
+    DuplicateLinkName { snapshot: String, link_name: String },
     TargetNameCollision { a: String, b: String, target: String },
     PatchedDependencies,
     ExcludedLinks,
@@ -458,6 +474,12 @@ pub enum LockWarning {
     DeprecatedPackage { key: String, message: String },
 }
 ```
+
+`DuplicateLinkName` fires when one snapshot lists the same link name under
+both `dependencies` and `optionalDependencies` — two entries for a single
+`node_modules/` slot, which S4's symlinking cannot both honour. Pudu rejects
+rather than picking a winner, since guessing would hide a real inconsistency
+in a lockfile pnpm should never have produced.
 
 `DeprecatedPackage` fires from the `deprecated` field (14 occurrences in the
 corpus) — useful signal that costs nothing to surface.
@@ -471,11 +493,12 @@ group. It is a development and testing surface, not a supported interface,
 and carries no stability promise.
 
 ```
-pudu debug print-graph [--config <path>] [-C <dir>]
+pudu debug print-graph [-C <dir>]
 ```
 
-Reads `pudu.toml` for `lockfile_path`, parses, builds the graph, prints JSON
-to stdout, exits 0. Errors go through `error::render` like every other
+Reads `pudu.toml` from the working directory for `lockfile_path`, parses,
+builds the graph, prints JSON to stdout, exits 0. There is no `--config`
+flag; use the global `-C` to run against another directory. Errors go through `error::render` like every other
 command.
 
 Output is deterministic — `BTreeMap` ordering throughout, no `HashMap`
@@ -583,7 +606,8 @@ feature check, which is not a module's worth of code.
 - bare `svelte@5.49.1`; scoped `@babel/core@7.28.6`
 - single peer `react-dom@18.3.1(react@18.3.1)`
 - **nested peers** `eslint-plugin-svelte@3.14.0(eslint@9.39.2(jiti@2.6.1))(svelte@5.49.1)`
-- the **verbatim 422-character key** from the corpus, round-tripped
+- a **verbatim 248-character real key**, nested three deep, round-tripped
+  (the fixture reaches 272; the differential test covers all 400 keys)
 - peer order is **preserved, not sorted**: `(a@1)(b@2)` and `(b@2)(a@1)` are
   distinct keys producing distinct target names (§5 rule 4)
 - the escape set: each of `\ / : * ? " < > | #` maps to `+`
@@ -626,31 +650,49 @@ feature check, which is not a module's worth of code.
 
 ### Fixtures
 
-`tests/fixtures/lock/` — hand-written and minimal, one concern each:
-dev/optional deps · peer instances of one package · scoped names · aliases ·
-a two-importer workspace · `link:` and `workspace:` specifiers · a cycle · a
-`tarball` and a `git` resolution · musl `libc` · v6 (rejection) · empty
-lockfile with no `packages`/`snapshots`.
+**Per-concern cases are inline YAML constants in the unit tests**, not files
+under `tests/fixtures/lock/`. An earlier draft of this spec called for one
+small file per concern; inline constants proved better, because the lockfile
+under test sits three lines above the assertion instead of in another
+directory. The concerns are the same: dev and optional deps, peer instances
+of one package, scoped names, aliases, a two-importer workspace, `link:` and
+`workspace:` specifiers, cycles, each `resolution:` variant, unknown
+platform tokens, v6 rejection, and an empty lockfile.
 
-Plus **one real-world lockfile** vendored into
-`tests/fixtures/lock/real/`: a 700+ node lockfile with nested peer instances,
-aliases, and cycles — the roadmap's demo criterion. Its provenance and
-licence are recorded beside it.
+**One real-world fixture** lives at `tests/fixtures/lock/real/` — a
+purpose-built pnpm workspace installed from public npm packages, so no
+private project's lockfile enters a public repo. 400 snapshot keys, 316
+virtual-store directories, 3 hashed names, 7 nested-peer keys, 3 npm-aliased
+edges, 26 platform-gated packages, 5 cycles. Its `README.md` records
+provenance, the coverage table, how to regenerate, and — importantly — what
+the differential test *cannot* catch.
 
 ### Integration tests
 
-`tests/debug_print_graph.rs` — `insta` snapshot of `print-graph` on the real
-lockfile, plus assertions that a second run is byte-identical (the
-determinism invariant) and that error paths exit 3.
+`tests/debug_print_graph.rs` — six tests over the real fixture: JSON shape
+and node count, determinism across runs (asserting parsed content, not a
+length floor), cycles present, the aliased edge surviving into output, the
+key-spelling contract in both directions, and a v6 lockfile exiting 3.
 
----
+`tests/virtual_store_names.rs` — the differential test against
+`virtual-store-listing.txt`, plus two guards on the fixture itself so a
+future regeneration cannot silently drop the hashed-name or alias cases.
+
+There is **no `insta` snapshot of `print-graph`**. An earlier draft called
+for one; the determinism test plus the key-spelling contract cover the same
+ground without a 400-node snapshot that would churn on every fixture
+regeneration. `tests/snapshots/` holds only the two `--help` snapshots.
 
 ## 13. Exit criteria
 
 1. `pudu debug print-graph` reads `pudu.toml` + lockfile and prints one JSON
    entry per snapshot key, deterministically.
-2. The snapshot-key parser handles nested peers, scoped names, and the
-   verbatim 422-char corpus key; peer order does not affect the target name.
+2. The snapshot-key parser handles nested peers, scoped names, and a
+   verbatim long real key (248 chars in the unit tests, 272 in the committed
+   fixture); peer order is preserved, not normalised away. The 422-char key
+   quoted in the survey came from a lockfile that was never committed, so it
+   is evidence for the *grammar*, not a test input — the differential test
+   over all 400 fixture keys is what actually proves the parser.
 3. Target names are byte-identical to pnpm's own virtual-store directory
    names, proven by the differential test against the captured `.pnpm`
    listing; a collision is a named error.

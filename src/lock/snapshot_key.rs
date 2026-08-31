@@ -8,7 +8,9 @@
 //!
 //! A peer is itself a full key, so the grammar is recursive and the parens
 //! balance to arbitrary depth — real lockfiles nest three levels and reach
-//! 422 characters. Two shortcuts are wrong and both are guarded by tests:
+//! 272 characters in the committed fixture, and 422 in a larger project
+//! measured during the field survey. Two shortcuts are wrong, and both are
+//! guarded by tests:
 //! splitting on the first `(` ignores nesting, and splitting the head on the
 //! first `@` breaks scoped names.
 
@@ -26,7 +28,8 @@ pub const MAX_PEER_DEPTH: usize = 64;
 /// Maximum total key length in bytes. Checked once, at [`SnapshotKey::parse`]
 /// — the public entry point — not in the recursive `parse_inner`, so a key's
 /// nested peers are not each re-checked against it. The real-world corpus's
-/// longest key is 422 bytes; 8192 leaves roughly nineteen times headroom.
+/// longest key measured in the field survey is 422 bytes (272 in the
+/// committed fixture); 8192 leaves roughly nineteen times headroom.
 ///
 /// [`MAX_PEER_DEPTH`] alone does not bound worst-case cost: a key can stay
 /// under the depth cap while still being enormous (many peers at shallow
@@ -316,7 +319,10 @@ fn parse_peers(
 mod tests {
     use super::*;
 
-    /// Verbatim from a real lockfile — the corpus's longest key at 272 chars.
+    /// Verbatim from a real lockfile, 248 chars, nested three deep. Not the
+    /// longest key that exists — the fixture reaches 272 and the field survey
+    /// measured 422 — but long-key handling is proven by the differential
+    /// test over all 400 fixture keys, not by this one constant.
     /// Nested three deep. If this parses, the grammar is right.
     const LONG_REAL_KEY: &str = "@sveltejs/kit@2.50.1(@sveltejs/vite-plugin-svelte@6.2.4(svelte@5.49.1)(vite@7.3.1(@types/node@22.19.7)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.46.0)))(svelte@5.49.1)(vite@7.3.1(@types/node@22.19.7)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.46.0))";
 
