@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use pudu::lock::parse_lockfile;
-use pudu::lock::snapshot_key::target_name;
+use pudu::lock::snapshot_key::{MAX_LEN_WITHOUT_HASH, target_name};
 
 fn load() -> (BTreeSet<String>, BTreeSet<String>) {
     let dir = Path::new("tests/fixtures/lock/real");
@@ -45,12 +45,17 @@ fn the_fixture_still_exercises_the_hashed_path() {
     // could silently drop the >120-char case, which is the branch most
     // likely to diverge.
     let (_, captured) = load();
+    // The stem/hash split point: `target_name` keeps `MAX_LEN_WITHOUT_HASH -
+    // 33` stem bytes, then an underscore, then a 32-hex-char digest prefix.
+    // Derived from the constant rather than hardcoded so changing it does not
+    // redden this test for the wrong reason.
+    let keep = MAX_LEN_WITHOUT_HASH - 33;
     let hashed = captured
         .iter()
         .filter(|n| {
-            n.len() == 120
-                && n.as_bytes()[87] == b'_'
-                && n[88..].chars().all(|c| c.is_ascii_hexdigit())
+            n.len() == MAX_LEN_WITHOUT_HASH
+                && n.as_bytes()[keep] == b'_'
+                && n[keep + 1..].chars().all(|c| c.is_ascii_hexdigit())
         })
         .count();
     assert!(
