@@ -255,9 +255,12 @@ fn resolve_bins(
         }
         // Present but unusable. pnpm's `if (manifest.bin)` branch is already
         // taken, so there is no fall back to `directories.bin`.
-        serde_json::Value::Bool(true)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::Array(_) => {}
+        //
+        // A number is truthy unless it's zero: `0` (and `-0`) is JavaScript's
+        // only falsy number, and JSON cannot express `NaN`, so `!= Some(0.0)`
+        // covers the whole falsy-number set here.
+        serde_json::Value::Bool(true) | serde_json::Value::Array(_) => {}
+        serde_json::Value::Number(n) if n.as_f64() != Some(0.0) => {}
         // Absent, or falsy in JavaScript's sense (`null`, `false`, `""`),
         // which is what `if (manifest.bin)` actually tests.
         _ => {
@@ -754,6 +757,26 @@ mod tests {
             "p",
         );
         assert!(b.is_empty(), "{b:?}");
+    }
+
+    #[test]
+    fn a_zero_bin_field_falls_through_to_directories_bin() {
+        // Unlike `42` above, `0` is JavaScript-falsy, so `if (manifest.bin)`
+        // is not taken and `directories.bin` is consulted instead.
+        let b = bins(
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"p","bin":0,"directories":{"bin":"tools"}}"#,
+                ),
+                ("tools/t.js", ""),
+            ],
+            "p",
+        );
+        assert_eq!(
+            b,
+            BTreeMap::from([("t.js".to_string(), "tools/t.js".to_string())])
+        );
     }
 
     #[test]
