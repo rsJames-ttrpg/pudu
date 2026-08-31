@@ -230,4 +230,17 @@ mod tests {
         assert!(lf.settings.auto_install_peers, "defaults to true");
         assert!(!lf.settings.exclude_links_from_lockfile);
     }
+
+    #[test]
+    fn malformed_yaml_is_a_yaml_error() {
+        // Unclosed flow mapping: the most likely real-world failure mode, and
+        // nothing previously pinned it to a variant.
+        let err = parse("lockfileVersion: '9.0'\nimporters: {\n").unwrap_err();
+        assert!(
+            matches!(err, LockError::Yaml { .. }),
+            "expected LockError::Yaml, got {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("pnpm-lock.yaml"), "must name the file: {msg}");
+    }
 }

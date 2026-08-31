@@ -169,3 +169,57 @@ fn a_v6_lockfile_exits_3() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("6.0") && stderr.contains('9'), "{stderr}");
 }
+
+#[test]
+fn an_unreadable_lockfile_names_the_real_problem() {
+    // FIX 2: an unreadable (not missing) lockfile must not be reported as
+    // "not found", since the path is correct and telling the user to edit
+    // `lockfile_path` is actively wrong advice.
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = common::scratch_with_lockfile("lockfileVersion: '9.0'\nimporters: {}\n");
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::set_permissions(&lockfile_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Root ignores file-mode permission bits, so the chmod above would not
+    // actually deny a root-run test. Detect that and skip rather than fail.
+    if std::fs::read_to_string(&lockfile_path).is_ok() {
+        eprintln!("skipping: running as root, chmod 000 does not deny reads");
+        return;
+    }
+
+    let out = common::pudu(dir.path())
+        .args(["debug", "print-graph"])
+        .output()
+        .unwrap();
+
+    // Restore permissions so the tempdir can be cleaned up.
+    std::fs::set_permissions(&lockfile_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert_eq!(out.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot read"),
+        "must not claim the file is missing: {stderr}"
+    );
+    assert!(
+        !stderr.contains("not found"),
+        "must not report a missing-file message for an unreadable file: {stderr}"
+    );
+    assert!(
+        !stderr.contains("edit `lockfile_path`"),
+        "must not tell the user to fix a path that is already correct: {stderr}"
+    );
+}
+
+#[test]
+fn a_malformed_yaml_lockfile_exits_3() {
+    // Malformed YAML is the most likely real-world failure mode; pin its
+    // exit code the same way the v6 case is pinned above.
+    let dir = common::scratch_with_lockfile("lockfileVersion: '9.0'\nimporters: {\n");
+    let out = common::pudu(dir.path())
+        .args(["debug", "print-graph"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+}
