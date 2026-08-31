@@ -62,7 +62,10 @@ tests). Deserialization is via `serde_norway`.
 
 ```rust
 pub struct Lockfile {
-    pub lockfile_version: LockfileVersion,
+    // No `lockfile_version` field. Only 9.0 parses at all (§8.1), so storing
+    // it would be a constant every consumer already knows; the gate rejects
+    // everything else before the body is deserialized. `print-graph` emits
+    // the `SUPPORTED_VERSION` constant.
     pub settings: Settings,                      // default if absent
     pub importers: BTreeMap<String, Importer>,   // path -> importer
     pub packages: BTreeMap<String, PackageMeta>, // "name@version" -> metadata
