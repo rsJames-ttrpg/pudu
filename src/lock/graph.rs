@@ -10,7 +10,12 @@ use crate::lock::types::{Lockfile, PackageMeta};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Graph {
-    /// Keyed by canonical snapshot key.
+    /// Keyed by `raw_key`, the lockfile's own spelling of the snapshot key
+    /// (not a re-canonicalized form). This coincides with the canonical
+    /// snapshot key for every valid v9 key, and edge targets are resolved
+    /// against `raw_key` too (see `resolve_edge`), so lookups stay
+    /// consistent even though the map is not keyed by `SnapshotKey::canonical`
+    /// directly.
     pub nodes: BTreeMap<String, Node>,
     pub roots: Vec<Root>,
     /// Populated by cycle detection. Cycles are normal — see the S1 spec §7.
@@ -534,14 +539,26 @@ snapshots:
 
     #[test]
     fn missing_package_metadata_names_snapshot_and_base() {
+        // A peer-suffixed snapshot key so the snapshot key and its base
+        // differ: with an unsuffixed key both are "a@1.0.0", so a test that
+        // only checks the message contains "a@1.0.0" cannot tell "names
+        // both" from "names one".
         let (lf, _) = parse_lockfile(
-            "lockfileVersion: '9.0'\nimporters: {}\npackages: {}\nsnapshots:\n  a@1.0.0: {}\n",
+            "lockfileVersion: '9.0'\nimporters: {}\npackages: {}\nsnapshots:\n  a@1.0.0(p@2.0.0): {}\n",
             Path::new("/x"),
         )
         .unwrap();
         let e = Graph::build(&lf).unwrap_err();
+        assert!(
+            matches!(e, LockError::MissingPackageMeta { .. }),
+            "expected MissingPackageMeta, got {e:?}"
+        );
         let m = format!("{e}");
-        assert!(m.contains("a@1.0.0"), "{m}");
+        assert!(
+            m.contains("a@1.0.0(p@2.0.0)"),
+            "must name the full snapshot key: {m}"
+        );
+        assert!(m.contains("a@1.0.0"), "must name the base: {m}");
     }
 
     #[test]
@@ -661,12 +678,19 @@ snapshots:
         )
         .unwrap();
         let e = Graph::build(&lf).unwrap_err();
-        assert!(
-            matches!(e, LockError::DuplicateLinkName { .. }),
-            "expected a DuplicateLinkName, got {e:?}"
-        );
-        let m = format!("{e}");
-        assert!(m.contains("a@1.0.0") && m.contains('b'), "{m}");
+        match e {
+            LockError::DuplicateLinkName {
+                snapshot,
+                link_name,
+            } => {
+                // `m.contains('b')` would pass on almost any message (it is
+                // also a substring of "both"); assert the full field values
+                // instead.
+                assert_eq!(snapshot, "a@1.0.0");
+                assert_eq!(link_name, "b");
+            }
+            other => panic!("expected DuplicateLinkName, got {other:?}"),
+        }
     }
 
     /// Regression coverage for the three shapes verified by hand in review:
