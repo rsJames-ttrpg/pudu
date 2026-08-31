@@ -14,6 +14,13 @@
 
 use std::fmt;
 
+/// Maximum peer-nesting depth. Real lockfiles nest three levels; 64 is
+/// generous headroom. Without a cap, parsing is superlinear in nesting depth
+/// (measured: ~4s at 4000 levels, no return within two minutes at 100,000) —
+/// an untrusted or malformed lockfile could hang the process rather than
+/// erroring, so depth is capped explicitly.
+pub const MAX_PEER_DEPTH: usize = 64;
+
 /// A parsed snapshot key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotKey {
@@ -47,21 +54,31 @@ impl std::error::Error for KeyParseError {}
 impl SnapshotKey {
     /// Parse a snapshot key.
     pub fn parse(s: &str) -> Result<Self, KeyParseError> {
-        Self::parse_inner(s, s)
+        Self::parse_inner(s, s, 0, 0)
     }
 
-    fn parse_inner(s: &str, whole: &str) -> Result<Self, KeyParseError> {
-        let err = |offset: usize, reason: &'static str| KeyParseError {
+    /// Parse the substring `s`, which begins at absolute byte offset `base`
+    /// within `whole`. `depth` is this key's peer-nesting depth (0 for the
+    /// top-level key), checked against [`MAX_PEER_DEPTH`] before recursing
+    /// into peers.
+    ///
+    /// Every locally-computed offset in this function is relative to `s`; it
+    /// must be added to `base` before it reaches a `KeyParseError`, since
+    /// `KeyParseError::offset` is always documented (and tested) as an
+    /// absolute offset into the original, top-level `whole`.
+    fn parse_inner(s: &str, whole: &str, base: usize, depth: usize) -> Result<Self, KeyParseError> {
+        let err = |local_offset: usize, reason: &'static str| KeyParseError {
             key: whole.to_string(),
-            offset,
+            offset: base + local_offset,
             reason,
         };
 
-        let suffix_start = top_level_paren(s, whole)?;
+        let suffix_start = top_level_paren(s, whole, base)?;
         let (head, suffix) = match suffix_start {
             Some(i) => (&s[..i], &s[i..]),
             None => (s, ""),
         };
+        let suffix_base = base + head.len();
 
         // The split is the LAST '@' at index > 0. Index 0 is excluded because
         // a scoped name starts with '@'.
@@ -83,7 +100,7 @@ impl SnapshotKey {
         Ok(Self {
             name: name.to_string(),
             version: version.to_string(),
-            peers: parse_peers(suffix, whole)?,
+            peers: parse_peers(suffix, whole, suffix_base, depth)?,
         })
     }
 
@@ -110,56 +127,83 @@ impl fmt::Display for SnapshotKey {
     }
 }
 
-/// Index of the first `(` at depth 0, or `None`. Errors on unbalanced parens.
-fn top_level_paren(s: &str, whole: &str) -> Result<Option<usize>, KeyParseError> {
-    let mut depth = 0usize;
+/// Index of the first `(` at depth 0 (relative to `s`), or `None`. Errors on
+/// unbalanced parens. `base` is `s`'s absolute offset within `whole`, used
+/// only to make error offsets absolute — the returned `Some` index stays
+/// local to `s`, since the caller uses it to slice `s`.
+fn top_level_paren(s: &str, whole: &str, base: usize) -> Result<Option<usize>, KeyParseError> {
+    let mut paren_depth = 0usize;
     let mut first = None;
     for (i, c) in s.char_indices() {
         match c {
             '(' => {
-                if depth == 0 && first.is_none() {
+                if paren_depth == 0 && first.is_none() {
                     first = Some(i);
                 }
-                depth += 1;
+                paren_depth += 1;
             }
             ')' => {
-                depth = depth.checked_sub(1).ok_or(KeyParseError {
+                paren_depth = paren_depth.checked_sub(1).ok_or(KeyParseError {
                     key: whole.to_string(),
-                    offset: i,
+                    offset: base + i,
                     reason: "unbalanced `)`",
                 })?;
             }
             _ => {}
         }
     }
-    if depth != 0 {
+    if paren_depth != 0 {
         return Err(KeyParseError {
             key: whole.to_string(),
-            offset: s.len(),
+            offset: base + s.len(),
             reason: "unbalanced `(`",
         });
     }
     Ok(first)
 }
 
-/// Split `(a)(b)` into its depth-0 groups and parse each recursively.
-fn parse_peers(suffix: &str, whole: &str) -> Result<Vec<SnapshotKey>, KeyParseError> {
+/// Split `(a)(b)` into its depth-0 groups and parse each recursively. `base`
+/// is `suffix`'s absolute offset within `whole`, threaded into each peer's
+/// recursive parse so its error offsets land on the right byte of `whole`
+/// rather than the peer's own local substring. `depth` is the nesting depth
+/// of the key `suffix` hangs off of; each peer is one level deeper, checked
+/// against [`MAX_PEER_DEPTH`] before recursing so a pathologically nested key
+/// errors instead of hanging.
+fn parse_peers(
+    suffix: &str,
+    whole: &str,
+    base: usize,
+    depth: usize,
+) -> Result<Vec<SnapshotKey>, KeyParseError> {
     let mut peers = Vec::new();
-    let mut depth = 0usize;
+    let mut paren_depth = 0usize;
     let mut start = None;
     for (i, c) in suffix.char_indices() {
         match c {
             '(' => {
-                if depth == 0 {
+                if paren_depth == 0 {
                     start = Some(i + 1);
                 }
-                depth += 1;
+                paren_depth += 1;
             }
             ')' => {
-                depth -= 1;
-                if depth == 0 {
+                paren_depth -= 1;
+                if paren_depth == 0 {
                     let from = start.take().expect("a close at depth 0 follows an open");
-                    peers.push(SnapshotKey::parse_inner(&suffix[from..i], whole)?);
+                    let peer_depth = depth + 1;
+                    if peer_depth > MAX_PEER_DEPTH {
+                        return Err(KeyParseError {
+                            key: whole.to_string(),
+                            offset: base + from,
+                            reason: "peer nesting exceeds the maximum depth of 64",
+                        });
+                    }
+                    peers.push(SnapshotKey::parse_inner(
+                        &suffix[from..i],
+                        whole,
+                        base + from,
+                        peer_depth,
+                    )?);
                 }
             }
             _ => {}
@@ -260,22 +304,76 @@ mod tests {
 
     #[test]
     fn rejects_malformed_keys() {
-        for bad in [
-            "x@1.0.0(a@1", // unbalanced open
-            "x@1.0.0)",    // stray close
-            "@1.0.0",      // empty name
-            "x@",          // empty version
-            "noatsign",    // no '@'
-            "@scope/name", // scoped, no version
-            "",            // empty
+        // (input, expected reason). `@1.0.0` and `@scope/name` share the
+        // generic "no split point" message: excluding the index-0 '@' (needed
+        // for scoped names) means neither ever finds a valid name/version
+        // split, so the parser can't tell them apart from "no '@' at all".
+        for (bad, reason) in [
+            ("x@1.0.0(a@1", "unbalanced `(`"),
+            ("x@1.0.0)", "unbalanced `)`"),
+            ("@1.0.0", "expected `name@version`"),
+            ("x@", "empty version"),
+            ("noatsign", "expected `name@version`"),
+            ("@scope/name", "expected `name@version`"),
+            ("", "expected `name@version`"),
         ] {
-            assert!(SnapshotKey::parse(bad).is_err(), "must reject {bad:?}");
+            let e = SnapshotKey::parse(bad).expect_err(&format!("must reject {bad:?}"));
+            assert_eq!(e.reason, reason, "wrong reason for {bad:?}: {e}");
         }
     }
 
     #[test]
-    fn error_names_the_key() {
+    fn error_names_the_key_and_offset() {
         let e = SnapshotKey::parse("x@1.0.0(a@1").unwrap_err();
-        assert!(!format!("{e}").is_empty());
+        assert_eq!(e.key, "x@1.0.0(a@1");
+        assert_eq!(e.offset, 11, "offset of the unbalanced `(` at EOF");
+    }
+
+    #[test]
+    fn nested_peer_error_offset_is_absolute_not_relative() {
+        // The empty version's '@' sits inside the peer group, at byte 9 of
+        // the whole key; the empty-version error points one past it, at
+        // byte 10 — not at the local offset within the recursed substring
+        // "y@" (which would incorrectly report byte 1).
+        let e = SnapshotKey::parse("x@1.0.0(y@)").unwrap_err();
+        assert_eq!(e.key, "x@1.0.0(y@)");
+        assert_eq!(e.reason, "empty version");
+        assert_eq!(e.offset, 10);
+    }
+
+    #[test]
+    fn two_level_nested_peer_error_offset_is_absolute() {
+        // "x@1.0.0(y@1.0.0(z@))" — the innermost peer "z@" starts at byte
+        // 16; its '@' is at byte 17, so the empty-version offset is 18.
+        let key = "x@1.0.0(y@1.0.0(z@))";
+        let e = SnapshotKey::parse(key).unwrap_err();
+        assert_eq!(e.key, key);
+        assert_eq!(e.reason, "empty version");
+        assert_eq!(e.offset, 18);
+    }
+
+    #[test]
+    fn peer_nesting_at_the_cap_still_parses() {
+        let key = nested_key(MAX_PEER_DEPTH);
+        assert!(
+            SnapshotKey::parse(&key).is_ok(),
+            "nesting exactly at MAX_PEER_DEPTH must still parse"
+        );
+    }
+
+    #[test]
+    fn peer_nesting_past_the_cap_errors_instead_of_hanging() {
+        let key = nested_key(MAX_PEER_DEPTH + 1);
+        let e = SnapshotKey::parse(&key).unwrap_err();
+        assert!(e.reason.contains("depth"), "must name the depth limit: {e}");
+    }
+
+    /// Build a key nested `n` levels deep: `p{n}@1.0.0(p{n-1}@1.0.0(...))`.
+    fn nested_key(n: usize) -> String {
+        let mut s = "p0@1.0.0".to_string();
+        for i in 1..=n {
+            s = format!("p{i}@1.0.0({s})");
+        }
+        s
     }
 }
