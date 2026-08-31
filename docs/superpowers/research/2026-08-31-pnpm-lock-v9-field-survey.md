@@ -226,3 +226,105 @@ the key is `name@value`.
 **Link name ≠ package name is therefore a property S1 must model on the
 edge**, not a detail S4 can reconstruct: the virtual store must symlink the
 package's content in under the *alias*, so the edge carries both.
+
+---
+
+## Reuse investigation — 2026-08-31
+
+Question asked: can existing pnpm work be reused to make S1 easier? Two
+candidates, one rejected and one adopted wholesale.
+
+### `chaste-pnpm` (crates.io) — rejected as a dependency, kept as corroboration
+
+v0.6.0, Apache-2.0 OR BSD-2-Clause, updated 2026-01-29, ~3.4k downloads, from
+the `chaste` lockfile-parser family. Only 586 lines, and it already uses
+`serde_norway` — the same YAML crate pudu uses.
+
+It independently implements the recursive peer-suffix grammar
+(`snapshot_key_rest`) and npm-alias handling (`is_aliased` / `alias_name`),
+which **independently corroborates both findings above**.
+
+It is nonetheless the wrong dependency for pudu:
+
+| need | chaste-pnpm |
+|---|---|
+| `os` / `cpu` / `libc` on packages | **absent** — its `Package` carries only resolution, version, peerDependencies |
+| `engines`, `hasBin`, `deprecated`, `bundledDependencies` | absent |
+| deterministic ordering | `HashMap` throughout; pudu's determinism invariant needs `BTreeMap` |
+| resolution variants | integrity + tarball only; no git or directory |
+| API shape | `parse(root_dir)` reads a directory and wants a `package.json` |
+
+The missing platform fields are decisive: they are exactly what S2's
+optional-dependency pruning — pudu's core value — operates on. Adopting
+chaste would mean forking it or landing upstream changes, then still working
+around `HashMap` ordering.
+
+### `@pnpm/dependency-path` — algorithm adopted, verified byte-exact
+
+The bigger win. Rather than inventing a target-name mangling scheme, pudu
+ports pnpm's own `depPathToFilename` (v1001.1.10):
+
+```js
+let filename = depPath.replace(/[\\/:*?"<>|#]/g, '+');
+if (filename.includes('(')) {
+  filename = filename.replace(/\)$/, '').replace(/\)\(|\(|\)/g, '_');
+}
+if (filename.length > maxLengthWithoutHash ||
+    (filename !== filename.toLowerCase() && !filename.startsWith('file+'))) {
+  return `${filename.substring(0, maxLengthWithoutHash - 33)}_${sha256hex(filename).slice(0, 32)}`;
+}
+return filename;
+```
+
+`maxLengthWithoutHash` is pnpm's `virtual-store-dir-max-length`, default
+**120**. `createShortHash` is `sha256(input).hex().slice(0, 32)`.
+
+**Verification.** Reimplemented and run over every snapshot key in two real
+lockfiles, diffed against the actual `node_modules/.pnpm/` directories pnpm
+created:
+
+| project | hashed names matched | hashed missed | plain matched | plain missed |
+|---|---|---|---|---|
+| main-currents/frontend | **24** | **0** | 728 | 82 |
+| trandox | **8** | **0** | 603 | 129 |
+
+**Every long/hashed name matched exactly — 32 for 32.** On the cleanly
+installed project the hashed set is a perfect bijection: 24 produced, 24 on
+disk, 24 matched, no extras.
+
+All 211 plain-name misses are explained and none is an algorithm fault: 208
+are optional dependencies pruned at install time for this platform
+(`@esbuild/android-arm64`, `@cloudflare/workerd-darwin-64`, …), and the
+remaining pair (`@emnapi/runtime`, `tslib`) are reachable only through the
+bundled-dependency wasm package that was itself pruned. trandox additionally
+has 12 stale store directories left by earlier installs — its `vite` entry on
+disk predates `terser` joining the peer set — which is store hygiene, not
+naming.
+
+**1363 directory names reproduced exactly.**
+
+### Consequences for the S1 spec
+
+Adopting pnpm's algorithm serves design §5's greppability goal literally
+rather than "in spirit" — a generated Buck target name can be pasted straight
+into `ls node_modules/.pnpm/`. It also satisfies the approved principle
+(readable stem, hash only to disambiguate) *better* than the scheme it
+replaces, because short peer sets stay fully readable
+(`vite@7.3.1_terser@5.46.0`) instead of being hashed away.
+
+Four details the invented scheme had wrong:
+
+1. **The escape set is `[\\/:*?"<>|#]` → `+`**, not `/` alone. Those are the
+   Windows-illegal path characters plus `#`.
+2. **Peers flatten to a readable `_` form** when short — trailing `)`
+   dropped, then `)(`, `(`, `)` each to `_`. Hashing is the fallback, not the
+   rule.
+3. **Uppercase forces the hash path** regardless of length (the
+   `filename !== filename.toLowerCase()` clause), guarding
+   case-insensitive filesystems. Nothing in the corpus exercises this — 0 of
+   3224 snapshot keys contain uppercase — so it is untested by real data and
+   needs a constructed fixture.
+4. **Peers must NOT be sorted.** pnpm hashes the lockfile's own order.
+   Design §5's "pudu re-sorts defensively" would produce names that diverge
+   from the real store, defeating the entire point. Determinism comes from
+   the lockfile being deterministic, which it is.
