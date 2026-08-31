@@ -197,6 +197,17 @@ pub enum ConfigError {
     )]
     LockfileNotFound { path: PathBuf },
 
+    #[error("cannot read lockfile {path}")]
+    #[diagnostic(
+        code(pudu::config::lockfile_unreadable),
+        help("the path is correct but the file could not be read; check its permissions")
+    )]
+    LockfileUnreadable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("third-party directory {path} is not writable")]
     #[diagnostic(code(pudu::config::third_party_not_writable))]
     ThirdPartyDirNotWritable {

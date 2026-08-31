@@ -26,13 +26,22 @@ pub fn print_graph() -> Result<()> {
 
     let base = std::env::current_dir()?;
     let lockfile_path = base.join(&config.lockfile_path);
-    // `ConfigError` has no dedicated "lockfile unreadable" variant; reuse
-    // `LockfileNotFound`, since an unreadable lockfile is not usefully
-    // distinguishable from a missing one at the CLI boundary.
-    let lock_text =
-        std::fs::read_to_string(&lockfile_path).map_err(|_| ConfigError::LockfileNotFound {
-            path: lockfile_path.clone(),
-        })?;
+    // Distinguish "not found" from "found but unreadable" (e.g. permissions):
+    // the latter is not a missing-file problem, and telling the user to edit
+    // `lockfile_path` when the path is already correct is actively wrong
+    // advice.
+    let lock_text = std::fs::read_to_string(&lockfile_path).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            ConfigError::LockfileNotFound {
+                path: lockfile_path.clone(),
+            }
+        } else {
+            ConfigError::LockfileUnreadable {
+                path: lockfile_path.clone(),
+                source,
+            }
+        }
+    })?;
 
     let (lockfile, warnings) = parse_lockfile(&lock_text, &lockfile_path)?;
     for w in &warnings {
@@ -41,6 +50,11 @@ pub fn print_graph() -> Result<()> {
 
     let graph = Graph::build(&lockfile)?;
     let out = serde_json::json!({
+        // The constant, not an observation of the parsed file: `parse_lockfile`
+        // already rejected anything but `SUPPORTED_VERSION` above, so this
+        // field can never disagree with the binary. A test asserting
+        // `== "9.0"` therefore cannot catch a regression here — it would need
+        // to instead assert against the gate in `parse_lockfile`/`LockError`.
         "lockfile_version": SUPPORTED_VERSION,
         "settings": lockfile.settings,
         "roots": graph.roots,
