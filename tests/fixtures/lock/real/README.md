@@ -55,3 +55,28 @@ Re-running the install with a newer pnpm will change both files together.
 Regenerate them as a pair, or the differential test is meaningless — and
 re-check the coverage table above, since a resolution change can silently drop
 the hashed-name or alias cases that make this fixture worth having.
+
+## What this fixture cannot catch
+
+The differential test is strong but not sufficient on its own, and mutation
+testing during S1 showed exactly where it stops.
+
+Breaking the hash-truncation stem length (`MAX_LEN_WITHOUT_HASH - 33` → `- 32`)
+reddens it immediately, naming the three hashed SvelteKit entries. But
+narrowing the escape set from the full `\ / : * ? " < > | #` down to just `/`
+**does not fail it** — none of the 400 snapshot keys here contains any of the
+other nine characters, because ordinary npm package names never do.
+
+That gap is covered by `escapes_every_illegal_path_character` in
+`src/lock/snapshot_key.rs`, a unit test over synthetic inputs, which was
+confirmed to fail under the same mutation. The two layers are complementary:
+
+| divergence | caught by |
+|---|---|
+| truncation length, hash function, hash trigger | this differential test |
+| paren flattening, `/` → `+` | this differential test |
+| the other nine escaped characters | the unit test |
+| uppercase forcing the hash path | the unit test |
+
+**So do not treat a green differential test as proof the port is intact.**
+Both layers must stay.
