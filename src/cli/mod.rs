@@ -1,6 +1,7 @@
 //! CLI surface and dispatch.
 
 pub mod config_check;
+pub mod debug;
 pub mod init;
 pub mod stub;
 pub mod toolchain;
@@ -66,15 +67,18 @@ pub enum Commands {
     /// Report unreferenced vendored tarballs. [UNIMPLEMENTED — Phase 2]
     Unused,
     /// Developer inspection commands.
-    // Has no subcommands at S0; S1 adds `print-graph` and S2 adds
-    // `platforms`. Modelled as trailing args rather than an empty
-    // `#[derive(Subcommand)]` enum, because deriving `Subcommand` on an
-    // uninhabited enum does not compile. Kept out of the `///` doc comment
-    // so clap does not ship this rationale to users in `--help`.
+    #[command(hide = true)]
     Debug {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: DebugCommands,
     },
+}
+
+/// Subcommands of the hidden `pudu debug` surface. No stability promise.
+#[derive(Subcommand, Debug)]
+pub enum DebugCommands {
+    /// Print the instance graph as JSON.
+    PrintGraph,
 }
 
 #[derive(Subcommand, Debug)]
@@ -111,10 +115,9 @@ impl Cli {
             Commands::Fixups => Err(stub::unimplemented("fixups", "S7/S8")),
             Commands::Audit => Err(stub::unimplemented("audit", "Phase 2")),
             Commands::Unused => Err(stub::unimplemented("unused", "Phase 2")),
-            Commands::Debug { args } => Err(crate::error::CliError::DebugNeedsSubcommand {
-                unknown: args.first().cloned(),
-            }
-            .into()),
+            Commands::Debug { command } => match command {
+                DebugCommands::PrintGraph => debug::print_graph(),
+            },
         }
     }
 }

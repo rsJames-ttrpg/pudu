@@ -73,16 +73,6 @@ pub enum CliError {
     #[diagnostic(code(pudu::init::config_exists))]
     ConfigExists { path: PathBuf },
 
-    #[error("pudu debug requires a subcommand{}", match unknown {
-        Some(u) => format!(": unknown `{u}`"),
-        None => String::new(),
-    })]
-    #[diagnostic(
-        code(pudu::usage::debug_subcommand),
-        help("none exist yet; S1 adds `print-graph`")
-    )]
-    DebugNeedsSubcommand { unknown: Option<String> },
-
     #[error("cannot read {path}")]
     #[diagnostic(
         code(pudu::config::unreadable),
@@ -122,9 +112,7 @@ impl CliError {
     pub fn exit_code(&self) -> ExitCode {
         match self {
             CliError::Unimplemented { .. } => ExitCode::Unimplemented,
-            CliError::ConfigExists { .. }
-            | CliError::DebugNeedsSubcommand { .. }
-            | CliError::BadDirectory { .. } => ExitCode::Usage,
+            CliError::ConfigExists { .. } | CliError::BadDirectory { .. } => ExitCode::Usage,
             CliError::ConfigUnreadable { .. } | CliError::ConfigInvalid { .. } => {
                 ExitCode::InputInvalid
             }

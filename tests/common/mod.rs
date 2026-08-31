@@ -40,3 +40,29 @@ pub fn project(config: Option<&str>) -> tempfile::TempDir {
     }
     d
 }
+
+/// A tempdir with a `pudu.toml` whose `lockfile_path` points at a copy of
+/// `fixture_dir`'s `pnpm-lock.yaml`.
+///
+/// (Unused by some test crates depending on which of this module's helpers
+/// they exercise — see the note on `GOOD_CONFIG` above for why the allow has
+/// to stay.)
+#[allow(dead_code)]
+pub fn scratch_with_config(fixture_dir: &Path) -> tempfile::TempDir {
+    let lock_text = std::fs::read_to_string(fixture_dir.join("pnpm-lock.yaml"))
+        .expect("fixture lockfile is readable");
+    scratch_with_lockfile(&lock_text)
+}
+
+/// A tempdir with a `pudu.toml` plus a `pnpm-lock.yaml` containing `text`.
+#[allow(dead_code)]
+pub fn scratch_with_lockfile(text: &str) -> tempfile::TempDir {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("pnpm-lock.yaml"), text).unwrap();
+    std::fs::write(
+        d.path().join("pudu.toml"),
+        "lockfile_path = \"pnpm-lock.yaml\"\n",
+    )
+    .unwrap();
+    d
+}
