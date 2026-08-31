@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod matching;
 
-pub use matching::admits;
+pub use matching::{admits, admits_platform};
 
 /// Operating system, using npm's `os` field vocabulary.
 ///

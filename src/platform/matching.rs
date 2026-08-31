@@ -46,6 +46,29 @@ pub fn admits(field: Option<&[String]>, current: &str) -> bool {
     matched || negations == list.len()
 }
 
+use crate::config::Platform;
+use crate::lock::types::PackageMeta;
+
+/// Does a package survive on a platform? All three axes must admit.
+///
+/// The `libc` axis is skipped entirely when the platform declares no libc.
+/// That reproduces pnpm's own behaviour on a machine with no detectable
+/// libc — a Mac, where `detect-libc` reports `unknown` and the axis is
+/// never checked. See spec §3 and survey §1.
+///
+/// Each axis matches npm's vocabulary: `linux`/`darwin`/`win32`,
+/// `x64`/`arm64`, `glibc`/`musl`. Note this is `Libc::as_npm` (`glibc`) and
+/// NOT `Libc::short` (`gnu`), which is the Buck spelling used only by
+/// constraint labels and generated platform names.
+pub fn admits_platform(meta: &PackageMeta, platform: &Platform) -> bool {
+    admits(meta.os.as_deref(), platform.os.as_npm())
+        && admits(meta.cpu.as_deref(), platform.cpu.as_npm())
+        && match platform.libc {
+            Some(libc) => admits(meta.libc.as_deref(), libc.as_npm()),
+            None => true,
+        }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +152,107 @@ mod tests {
     #[test]
     fn bare_bang_is_a_negation_of_the_empty_string() {
         assert!(admits(Some(&list(&["!"])), "linux"));
+    }
+
+    // These tests live in `platform::matching`, so `use super::*` brings in
+    // this module's items — not the parent module's enums, which must be
+    // named explicitly.
+    use crate::config::Platform;
+    use crate::lock::types::{PackageMeta, Resolution};
+    use crate::platform::{Cpu, Libc, Os};
+
+    /// A `PackageMeta` carrying only the three platform axes; every other
+    /// field takes its default.
+    fn meta(os: Option<&[&str]>, cpu: Option<&[&str]>, libc: Option<&[&str]>) -> PackageMeta {
+        PackageMeta {
+            resolution: Resolution::Integrity {
+                integrity: "sha512-test".to_string(),
+            },
+            engines: Default::default(),
+            os: os.map(list),
+            cpu: cpu.map(list),
+            libc: libc.map(list),
+            has_bin: false,
+            deprecated: None,
+            peer_dependencies: Default::default(),
+            peer_dependencies_meta: Default::default(),
+            bundled_dependencies: Vec::new(),
+        }
+    }
+
+    fn platform(os: Os, cpu: Cpu, libc: Option<Libc>) -> Platform {
+        Platform {
+            os,
+            cpu,
+            libc,
+            constraints: None,
+        }
+    }
+
+    #[test]
+    fn all_three_axes_must_admit() {
+        let p = platform(Os::Linux, Cpu::X64, Some(Libc::Glibc));
+        assert!(admits_platform(
+            &meta(Some(&["linux"]), Some(&["x64"]), None),
+            &p
+        ));
+        assert!(!admits_platform(
+            &meta(Some(&["darwin"]), Some(&["x64"]), None),
+            &p
+        ));
+        assert!(!admits_platform(
+            &meta(Some(&["linux"]), Some(&["arm64"]), None),
+            &p
+        ));
+        assert!(!admits_platform(
+            &meta(Some(&["linux"]), Some(&["x64"]), Some(&["musl"])),
+            &p
+        ));
+    }
+
+    #[test]
+    fn a_package_with_no_platform_fields_survives_every_platform() {
+        for p in [
+            platform(Os::Linux, Cpu::X64, Some(Libc::Glibc)),
+            platform(Os::Darwin, Cpu::Arm64, None),
+            platform(Os::Win32, Cpu::X64, None),
+        ] {
+            assert!(admits_platform(&meta(None, None, None), &p));
+        }
+    }
+
+    /// pnpm evaluates the libc axis only when a libc is detectable, which it
+    /// is not on macOS — so a Mac never checks libc, whatever a package
+    /// declares. A platform with no configured libc reproduces that.
+    #[test]
+    fn libc_axis_is_skipped_when_the_platform_declares_none() {
+        let mac = platform(Os::Darwin, Cpu::Arm64, None);
+        assert!(admits_platform(
+            &meta(Some(&["darwin"]), Some(&["arm64"]), Some(&["musl"])),
+            &mac
+        ));
+        assert!(admits_platform(
+            &meta(Some(&["darwin"]), Some(&["arm64"]), Some(&["glibc"])),
+            &mac
+        ));
+    }
+
+    #[test]
+    fn libc_axis_discriminates_when_the_platform_declares_one() {
+        let gnu = platform(Os::Linux, Cpu::X64, Some(Libc::Glibc));
+        let musl = platform(Os::Linux, Cpu::X64, Some(Libc::Musl));
+        let m = meta(Some(&["linux"]), Some(&["x64"]), Some(&["musl"]));
+        assert!(!admits_platform(&m, &gnu));
+        assert!(admits_platform(&m, &musl));
+    }
+
+    /// The npm spelling is `glibc`, not `gnu` — `gnu` is the *Buck* spelling.
+    /// Matching against `Libc::short()` here would silently prune every
+    /// glibc-gated package.
+    #[test]
+    fn libc_matches_the_npm_spelling_not_the_buck_one() {
+        let gnu = platform(Os::Linux, Cpu::X64, Some(Libc::Glibc));
+        assert!(admits_platform(&meta(None, None, Some(&["glibc"])), &gnu));
+        assert!(!admits_platform(&meta(None, None, Some(&["gnu"])), &gnu));
     }
 }
