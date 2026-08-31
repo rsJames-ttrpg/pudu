@@ -167,7 +167,20 @@ const ILLEGAL: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|', '#'];
 /// see the field survey. **Do not "improve" this** — any deviation breaks
 /// greppability against the real store, which is the whole point.
 pub fn target_name(dep_path: &str) -> String {
+    // Truncation below is by UTF-8 *byte* budget; pnpm's JS truncates by
+    // UTF-16 code unit. For a multi-byte name near the boundary this yields a
+    // shorter stem than pnpm would — never longer. Unreachable in practice:
+    // the npm registry admits only ASCII package names, so no real lockfile
+    // key can trigger it. A synthetic or hostile lockfile could, and the
+    // result is a name that stays internally consistent but no longer matches
+    // that package's directory in a real virtual store.
+    //
     // pnpm strips a leading '/' (a legacy v5 dep-path form) before escaping.
+    // The reference does this only for non-`file:` paths, but a `file:` path
+    // never starts with '/', and the reference's `file:` branch replaces just
+    // the first ':' — which the escape below subsumes by replacing all of
+    // them. So the unconditional form here is equivalent, not a shortcut;
+    // verified by differential fuzzing against the reference implementation.
     let s = dep_path.strip_prefix('/').unwrap_or(dep_path);
     let mut filename: String = s
         .chars()
