@@ -106,6 +106,84 @@ fn is_link_specifier(specifier: &str, version: &str) -> bool {
         || version.starts_with("file:")
 }
 
+/// Node colours for the iterative DFS.
+#[derive(Clone, Copy, PartialEq)]
+enum Colour {
+    White,
+    Grey,
+    Black,
+}
+
+/// Find cycles with an explicit stack.
+///
+/// Iterative by necessity: real lockfiles reach 800+ nodes with deep chains,
+/// and a recursive DFS overflows. Cycles are normal in npm graphs (`@babel`,
+/// `eslint`, `browserslist` all have them), so this reports rather than
+/// rejects — see the S1 spec §7 for why that is safe under the single
+/// `filegroup` store.
+///
+/// Deduplication: a cycle's identity is its node set, not the path text —
+/// the same cycle found from a different DFS start yields the same nodes in
+/// a rotated order, and would otherwise be reported once per entry point
+/// that can reach it. So the dedup key is the node set sorted into a fixed
+/// order (a `BTreeSet`), which is rotation-invariant; the reported cycle
+/// itself keeps its original discovery order.
+fn find_cycles(nodes: &BTreeMap<String, Node>) -> Vec<Vec<String>> {
+    let mut colour: BTreeMap<&str, Colour> =
+        nodes.keys().map(|k| (k.as_str(), Colour::White)).collect();
+    let mut cycles = Vec::new();
+    let mut seen: std::collections::BTreeSet<std::collections::BTreeSet<String>> =
+        Default::default();
+
+    for start in nodes.keys() {
+        if colour[start.as_str()] != Colour::White {
+            continue;
+        }
+        // Explicit stack of (node, index of the next edge to visit),
+        // mirrored by `path`, the sequence of grey nodes from `start` down
+        // to the node currently on top of `stack`. The two stay in step:
+        // a node is pushed onto both when it turns grey, and popped from
+        // both when its edges are exhausted and it turns black.
+        let mut stack: Vec<(&str, usize)> = vec![(start.as_str(), 0)];
+        let mut path: Vec<&str> = vec![start.as_str()];
+        colour.insert(start.as_str(), Colour::Grey);
+
+        while let Some((node, edge_idx)) = stack.pop() {
+            let edges = &nodes[node].edges;
+            if edge_idx < edges.len() {
+                stack.push((node, edge_idx + 1));
+                let next = edges[edge_idx].target.as_str();
+                match colour[next] {
+                    Colour::Grey => {
+                        // Back edge: the cycle is the path from `next` on.
+                        let pos = path
+                            .iter()
+                            .position(|n| *n == next)
+                            .expect("a grey node is always on the current path");
+                        let cycle: Vec<String> =
+                            path[pos..].iter().map(|s| s.to_string()).collect();
+                        let key: std::collections::BTreeSet<String> =
+                            cycle.iter().cloned().collect();
+                        if seen.insert(key) {
+                            cycles.push(cycle);
+                        }
+                    }
+                    Colour::White => {
+                        colour.insert(next, Colour::Grey);
+                        stack.push((next, 0));
+                        path.push(next);
+                    }
+                    Colour::Black => {}
+                }
+            } else {
+                colour.insert(node, Colour::Black);
+                path.pop();
+            }
+        }
+    }
+    cycles
+}
+
 impl Graph {
     pub fn build(lockfile: &Lockfile) -> Result<Self, LockError> {
         let mut nodes = BTreeMap::new();
@@ -230,10 +308,11 @@ impl Graph {
             }
         }
 
+        let cycles = find_cycles(&nodes);
         Ok(Self {
             nodes,
             roots,
-            cycles: Vec::new(),
+            cycles,
         })
     }
 }
@@ -590,5 +669,152 @@ snapshots:
             "foo@1.0.0(bar@2.0.0)",
             "an '@' inside the peer suffix must not be mistaken for an alias"
         );
+    }
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+    use crate::lock::parse_lockfile;
+    use std::path::Path;
+
+    fn build(yaml: &str) -> Graph {
+        let (lf, _) = parse_lockfile(yaml, Path::new("/x")).unwrap();
+        Graph::build(&lf).unwrap()
+    }
+
+    #[test]
+    fn two_node_cycle_is_recorded_and_does_not_error() {
+        let g = build(
+            r#"
+lockfileVersion: '9.0'
+importers: {}
+packages:
+  a@1.0.0: {resolution: {integrity: sha512-a}}
+  b@1.0.0: {resolution: {integrity: sha512-b}}
+snapshots:
+  a@1.0.0:
+    dependencies: {b: 1.0.0}
+  b@1.0.0:
+    dependencies: {a: 1.0.0}
+"#,
+        );
+        assert_eq!(g.cycles.len(), 1, "one cycle: {:?}", g.cycles);
+        let c = &g.cycles[0];
+        assert!(c.contains(&"a@1.0.0".to_string()) && c.contains(&"b@1.0.0".to_string()));
+    }
+
+    #[test]
+    fn self_edge_is_a_cycle_of_length_one() {
+        let g = build(
+            r#"
+lockfileVersion: '9.0'
+importers: {}
+packages:
+  a@1.0.0: {resolution: {integrity: sha512-a}}
+snapshots:
+  a@1.0.0:
+    dependencies: {a: 1.0.0}
+"#,
+        );
+        assert_eq!(g.cycles.len(), 1, "{:?}", g.cycles);
+    }
+
+    #[test]
+    fn an_acyclic_graph_reports_no_cycles() {
+        let g = build(
+            r#"
+lockfileVersion: '9.0'
+importers: {}
+packages:
+  a@1.0.0: {resolution: {integrity: sha512-a}}
+  b@1.0.0: {resolution: {integrity: sha512-b}}
+snapshots:
+  a@1.0.0:
+    dependencies: {b: 1.0.0}
+  b@1.0.0: {}
+"#,
+        );
+        assert!(g.cycles.is_empty());
+    }
+
+    #[test]
+    fn deep_chain_does_not_overflow_the_stack() {
+        // A recursive DFS blows the stack here. Real lockfiles reach 800+
+        // nodes; this is the same shape, larger.
+        const N: usize = 10_000;
+        let mut y = String::from("lockfileVersion: '9.0'\nimporters: {}\npackages:\n");
+        for i in 0..N {
+            y.push_str(&format!(
+                "  p{i}@1.0.0: {{resolution: {{integrity: sha512-x}}}}\n"
+            ));
+        }
+        y.push_str("snapshots:\n");
+        for i in 0..N {
+            y.push_str(&format!("  p{i}@1.0.0:\n"));
+            if i + 1 < N {
+                y.push_str(&format!("    dependencies: {{p{}: 1.0.0}}\n", i + 1));
+            }
+        }
+        let g = build(&y);
+        assert_eq!(g.nodes.len(), N);
+        assert!(g.cycles.is_empty());
+    }
+
+    #[test]
+    fn cycles_are_deterministic_across_runs() {
+        let y = r#"
+lockfileVersion: '9.0'
+importers: {}
+packages:
+  a@1.0.0: {resolution: {integrity: sha512-a}}
+  b@1.0.0: {resolution: {integrity: sha512-b}}
+  c@1.0.0: {resolution: {integrity: sha512-c}}
+snapshots:
+  a@1.0.0: {dependencies: {b: 1.0.0}}
+  b@1.0.0: {dependencies: {c: 1.0.0}}
+  c@1.0.0: {dependencies: {a: 1.0.0}}
+"#;
+        let g1 = build(y);
+        let g2 = build(y);
+        assert_eq!(g1.cycles, g2.cycles);
+        // A deterministic-but-wrong implementation (e.g. always returning an
+        // empty Vec, or one fixed rotation regardless of traversal order)
+        // would also satisfy the equality above. Pin down the actual content
+        // so this test can't pass against such an implementation.
+        assert_eq!(g1.cycles.len(), 1, "{:?}", g1.cycles);
+        let mut sorted = g1.cycles[0].clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            vec![
+                "a@1.0.0".to_string(),
+                "b@1.0.0".to_string(),
+                "c@1.0.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cycle_reachable_from_two_roots_is_reported_once() {
+        // x -> a -> b -> a (cycle), and y -> a -> b -> a (same cycle, found
+        // again from a different DFS start). Must be deduplicated.
+        let g = build(
+            r#"
+lockfileVersion: '9.0'
+importers: {}
+packages:
+  x@1.0.0: {resolution: {integrity: sha512-x}}
+  y@1.0.0: {resolution: {integrity: sha512-y}}
+  a@1.0.0: {resolution: {integrity: sha512-a}}
+  b@1.0.0: {resolution: {integrity: sha512-b}}
+snapshots:
+  x@1.0.0: {dependencies: {a: 1.0.0}}
+  y@1.0.0: {dependencies: {a: 1.0.0}}
+  a@1.0.0: {dependencies: {b: 1.0.0}}
+  b@1.0.0: {dependencies: {a: 1.0.0}}
+"#,
+        );
+        assert_eq!(g.cycles.len(), 1, "{:?}", g.cycles);
     }
 }
