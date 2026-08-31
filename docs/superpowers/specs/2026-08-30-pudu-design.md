@@ -211,31 +211,31 @@ pnpm v9 snapshot keys encode peer resolutions in parentheses: `react-dom@18.3.1(
 
 **Design: one Buck target per snapshot key.** Tarball targets stay keyed on `name@version`, so nothing is downloaded twice; only the dep wiring differs per instance.
 
-Target-name mangling keeps package identity readable at every length and
-hashes only the peer suffix:
+Target-name mangling is a **direct port of pnpm's own `depPathToFilename`**
+(`@pnpm/dependency-path`), not an invented scheme. Generated Buck target names
+are therefore byte-identical to the directory names in a real
+`node_modules/.pnpm/`, so a target name can be pasted straight into `ls` there.
 
-- `/` → `+` (`@scope/name` → `@scope+name`), mirroring pnpm's own
-  virtual-store convention so names stay greppable against a real
-  `node_modules/.pnpm/` directory
-- `@` retained; Buck target names permit it
-- a key with no peers is left as `name@version`
-- a key with peers gets `_<first 12 hex of sha256(canonical peer suffix)>`
+In outline: escape `\ / : * ? " < > | #` to `+`; flatten peer parens to `_`;
+and if the result exceeds 120 characters — or contains any uppercase, which
+guards case-insensitive filesystems — truncate to 87 characters and append
+`_` plus the first 32 hex of its sha256. Short peer sets stay fully readable
+(`vite@7.3.1_terser@5.46.0`); long ones keep a readable stem and a hash tail.
 
-Real snapshot keys reach 422 characters in ordinary projects (see the
-[v9 field survey](../research/2026-08-31-pnpm-lock-v9-field-survey.md)), so an
-earlier draft's "hash the whole key past 128 chars" rule would have fired on
-the common case and destroyed package identity exactly where peer instances
-make it matter. Hashing only the suffix bounds the name at `name@version`
-plus 13 characters while keeping the package legible.
+Peers are **not** sorted: pnpm hashes the lockfile's own order, and re-sorting
+would make every hashed name diverge from the real store. Determinism comes
+from the lockfile being deterministic. Two distinct keys mangling to one
+target name is a hard error naming both.
 
-Determinism requires the peer suffix be sorted before hashing; pnpm already
-emits them sorted, but pudu re-sorts recursively and defensively. Two distinct
-keys mangling to one target name is a hard error naming both.
+A reimplementation was verified against real virtual stores — 1363 directory
+names reproduced exactly, including 32 of 32 hashed long names (see the
+[v9 field survey](../research/2026-08-31-pnpm-lock-v9-field-survey.md)).
 
 Peer suffixes nest to arbitrary depth
 (`eslint-plugin-svelte@3.14.0(eslint@9.39.2(jiti@2.6.1))(svelte@5.49.1)`), so
 the grammar is recursive and must be parsed with paren-depth tracking. Full
-grammar and the npm-alias edge rule: [S1 spec](2026-08-31-pudu-s1-lockfile-design.md).
+grammar, the npm-alias edge rule, and the exact naming algorithm:
+[S1 spec](2026-08-31-pudu-s1-lockfile-design.md).
 
 ### Platform pruning
 

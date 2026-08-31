@@ -45,7 +45,9 @@ spec depends on its conclusions:
   must be covered by constructed fixtures and unknown ones rejected by name.
 - **Peer suffixes nest recursively** to arbitrary depth.
 - **Real snapshot keys reach 422 characters**, so long-key handling is the
-  main path, not an edge case.
+  main path, not an edge case. Naming is settled by porting pnpm's own
+  `depPathToFilename`, verified byte-exact against 1363 real store
+  directories (§5).
 - **Cycles are universal** — every lockfile surveyed has them. They must be
   detected and reported, never rejected (§7).
 - **Edge values may be npm aliases**, so link name ≠ package name (§6.2).
@@ -179,59 +181,103 @@ pub struct SnapshotKey {
 impl SnapshotKey {
     pub fn parse(s: &str) -> Result<Self, KeyParseError>;
     pub fn base(&self) -> String;         // "name@version", no peers
-    pub fn canonical(&self) -> String;    // peers sorted, recursively
+    pub fn canonical(&self) -> String;    // lockfile form, peer order preserved
     pub fn target_name(&self) -> String;  // §5
 }
 ```
 
-`canonical()` sorts peers lexicographically by their own canonical form at
-every level. pnpm already emits them sorted; pudu re-sorts so that
-determinism does not depend on that.
+`canonical()` renders the key back to its lockfile form. It **does not sort
+peers** — see §5 rule 4: pnpm's naming hashes the lockfile's own peer order,
+so re-sorting would make every hashed target name diverge from the real
+virtual store. The lockfile's own ordering is already deterministic, so
+nothing is lost.
 
 ---
 
-## 5. Target-name mangling
+## 5. Target-name mangling — port pnpm's algorithm
 
-The survey found real keys at 422 characters, which makes the design's
-original "hash the whole key past 128 chars" rule fire on the common case and
-destroy package identity exactly where peer instances make it matter. The
-rule is therefore:
+**Pudu does not invent a naming scheme. It ports pnpm's `depPathToFilename`
+exactly**, from `@pnpm/dependency-path` v1001.1.10.
 
-> **Mangle `name@version` readably and always. Hash only the peer suffix.**
-
-```
-mangled_name := name with '/' -> '+'          (@scope/name -> @scope+name)
-stem         := mangled_name "@" version
-target_name  := stem                                    if no peers
-              | stem "_" hex12(sha256(canonical_peers)) if peers
-```
-
-`canonical_peers` is the sorted, recursively-canonical rendering of the peer
-list, so `(a@1)(b@2)` and `(b@2)(a@1)` hash identically.
+Design §5 wants generated names greppable against a real
+`node_modules/.pnpm/` directory. Matching pnpm byte-for-byte serves that goal
+literally rather than approximately: a Buck target name can be pasted
+straight into `ls node_modules/.pnpm/`. It also satisfies the approved
+principle — readable stem, hash only to disambiguate — better than the scheme
+it replaces, because short peer sets stay fully readable rather than hashed.
 
 ```
-svelte@5.49.1                          -> svelte@5.49.1
-@sveltejs/kit@2.50.1(…422 chars…)      -> @sveltejs+kit@2.50.1_a3f9c1220b1e
-@babel/core@7.28.6                     -> @babel+core@7.28.6
+fn target_name(dep_path: &str, max_len: usize /* 120 */) -> String {
+    // 1. escape the Windows-illegal characters plus '#'
+    let mut s = replace_any(dep_path, r#"\/:*?"<>|#"#, '+');
+
+    // 2. flatten peer parens, if any
+    if s.contains('(') {
+        s = s.strip_suffix(')').unwrap_or(&s).to_string();
+        s = s.replace(")(", "_").replace('(', "_").replace(')', "_");
+    }
+
+    // 3. hash when too long, OR when any uppercase is present
+    if s.len() > max_len || (s != s.to_lowercase() && !s.starts_with("file+")) {
+        let h = &sha256_hex(&s)[..32];
+        return format!("{}_{}", &s[..max_len - 33], h);
+    }
+    s
+}
 ```
 
-Package identity survives at every length, the length is bounded by
-`name@version` plus 13, and the `/`→`+` convention keeps names greppable
-against a real `node_modules/.pnpm/` directory, as design §5 intends.
+```
+svelte@5.49.1                                    -> svelte@5.49.1
+@babel/core@7.28.6                               -> @babel+core@7.28.6
+vite@7.3.1(@types/node@22.19.7)(terser@5.46.0)   -> vite@7.3.1_@types+node@22.19.7_terser@5.46.0
+@sveltejs/kit@2.50.1(…422 chars…)                -> @sveltejs+kit@2.50.1_@sveltejs+vite-plugin-svelte@6.2.4_svelte@…_5908f9fc12a8139630f640243ef0c4e3
+MyPkg@1.0.0                                      -> MyPkg@1.0.0_fa093f5301680d2c9a22ce22952dfea8
+```
 
-> **Note for review:** the option preview shown at approval time rendered this
-> as `sveltejs-kit-2.50.1-a3f9c1`. The principle chosen — readable stem, hash
-> only the peers — is what this spec adopts; the concrete separators here keep
-> design §5's `@scope+name@version` form for greppability instead. Flag it if
-> the flatter form was the point.
+### Four rules that are easy to get wrong
 
-**Collisions are a hard error.** Two distinct snapshot keys mangling to one
-target name aborts the run naming both keys and the shared name. At 48 bits
-over a few thousand packages this should never fire; it is a correctness
-guard, not an expected path, and it is tested with injected collisions rather
-than left to chance.
+1. **The escape set is `\ / : * ? " < > | #` → `+`**, not `/` alone.
+2. **Peers flatten readably when short.** Trailing `)` is dropped first, then
+   `)(`, `(`, and `)` each become `_`. Hashing is the fallback, not the rule.
+3. **Uppercase forces the hash path at any length** — the
+   `s != s.to_lowercase()` clause, which guards case-insensitive filesystems.
+   No corpus lockfile exercises this (0 of 3224 snapshot keys contain
+   uppercase), so it needs a constructed fixture and is a likely site for a
+   silent divergence.
+4. **Peers must NOT be sorted.** pnpm hashes the lockfile's own peer order.
+   Sorting would produce names that diverge from the real store and defeat
+   the point. Determinism comes from the lockfile being deterministic.
+   *This reverses `SnapshotKey::canonical()`'s defensive re-sort as originally
+   drafted, and supersedes design §5's "pudu re-sorts defensively" line.*
 
-This supersedes design §5's mangling paragraph, which is amended to match.
+`max_len` is pnpm's `virtual-store-dir-max-length`, default **120**. Pudu
+hardcodes 120 for v0.1.0 and does not expose it; a project that has changed
+the pnpm setting gets names that do not match its store, which is a
+cosmetic-only divergence and a documented limitation, not a correctness bug.
+
+### Verification
+
+This is not adopted on faith. A reimplementation was diffed against the real
+`node_modules/.pnpm/` directories of two projects
+([survey](../research/2026-08-31-pnpm-lock-v9-field-survey.md)):
+**1363 directory names reproduced exactly, including 32 of 32 hashed long
+names**, with a perfect bijection on the cleanly installed project. Every
+miss was an optional dependency pruned at install time for this platform.
+
+S1 reproduces that check as a test: `tests/fixtures/lock/real/` ships the
+lockfile beside a **captured listing of the `.pnpm` directory names** it
+produced, and a test asserts pudu regenerates every non-pruned one. That is a
+differential test against the real implementation with no runtime dependency
+on pnpm — and it is the single highest-value test in the stage, because it
+catches any divergence in all four rules at once.
+
+### Collisions
+
+pnpm's scheme can in principle collide, since the hash covers the full
+filename and the prefix is truncated. Two distinct snapshot keys mangling to
+one target name is a hard error naming both keys and the shared name — a
+correctness guard, tested with injected collisions rather than left to
+chance.
 
 ---
 
@@ -369,6 +415,10 @@ install`).
 
 ## 9. Errors and warnings
 
+S1 adds a `sha2` dependency for §5's naming hash — the first new runtime
+dependency since the S0 trim, and required by the ported algorithm rather
+than chosen.
+
 S1 adds `LockError` and `LockWarning` to the existing machinery in
 `src/error.rs`, registered through the `typed_errors!` macro so exit code and
 diagnostic stay in one place. Malformed lockfiles are **input errors: exit
@@ -476,12 +526,18 @@ feature check, which is not a module's worth of code.
 - single peer `react-dom@18.3.1(react@18.3.1)`
 - **nested peers** `eslint-plugin-svelte@3.14.0(eslint@9.39.2(jiti@2.6.1))(svelte@5.49.1)`
 - the **verbatim 422-character key** from the corpus, round-tripped
-- peer-order independence: `(a@1)(b@2)` and `(b@2)(a@1)` produce one target name
+- peer order is **preserved, not sorted**: `(a@1)(b@2)` and `(b@2)(a@1)` are
+  distinct keys producing distinct target names (§5 rule 4)
+- the escape set: each of `\ / : * ? " < > | #` maps to `+`
+- **uppercase forces the hash path** even on a short name — the branch no
+  corpus lockfile exercises
 - prerelease and build-metadata versions: `1.0.0-rc.1`, `1.0.0+build.5`
 - rejects: unbalanced `(`, trailing `)`, empty name, empty version, no `@`,
   bare `@scope/name` with no version
-- mangling: `/`→`+`; no-peer keys get no hash; length stays bounded
+- short peer sets flatten readably (`vite@7.3.1_terser@5.46.0`), not hashed
 - an injected collision produces `TargetNameCollision`, not silent overwrite
+- **the differential test**: every non-pruned name in the captured `.pnpm`
+  listing beside the real fixture is regenerated exactly
 
 **`graph.rs`**
 
@@ -537,8 +593,9 @@ determinism invariant) and that error paths exit 3.
    entry per snapshot key, deterministically.
 2. The snapshot-key parser handles nested peers, scoped names, and the
    verbatim 422-char corpus key; peer order does not affect the target name.
-3. Target names keep a readable `name@version` stem at every length; a
-   collision is a named error.
+3. Target names are byte-identical to pnpm's own virtual-store directory
+   names, proven by the differential test against the captured `.pnpm`
+   listing; a collision is a named error.
 4. Aliased edges resolve to the aliased package while retaining the link
    name, proven by a test asserting both.
 5. Cycles are detected, reported in the output, and do not error — proven
@@ -566,6 +623,15 @@ determinism invariant) and that error paths exit 3.
   `git`, and `directory` variants are modelled from the pnpm source and
   covered only by constructed fixtures. First contact with a real private
   registry may correct this.
-- **48-bit peer hash.** Ample for thousands of packages, and collisions are
-  caught rather than silently wrong. If a monorepo ever trips it, widening
-  the hash is a one-line change that churns every peer-instance target name.
+- **`virtual-store-dir-max-length` is hardcoded to 120.** A project that has
+  changed pnpm's setting gets target names that do not match its own store.
+  The names stay internally consistent and correct, so this is cosmetic —
+  greppability is lost, nothing breaks. Exposing it is a config addition if
+  anyone asks.
+- **The uppercase branch of pnpm's naming is untested by real data** — 0 of
+  3224 corpus snapshot keys contain an uppercase character. It is covered by
+  a constructed fixture, but a real uppercase package is the likeliest source
+  of a silent divergence from the store.
+- **`chaste-pnpm` was evaluated and rejected** as a dependency (it drops the
+  platform fields S2 needs; see the survey). If it ever grows them, revisit —
+  its peer grammar and alias handling already agree with this spec.
