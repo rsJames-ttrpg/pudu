@@ -68,6 +68,11 @@ impl Generated {
             source,
         })?;
 
+        // Probed once for the whole call (not once per file): all three
+        // generated files are meant to end up with the same mode, and a
+        // umask is a process-wide property anyway.
+        let mode = crate::fsutil::probe_umask_mode(third_party_dir);
+
         let mut pending = Vec::with_capacity(3);
         for (path, contents) in self.files(third_party_dir) {
             let dir = path
@@ -84,6 +89,7 @@ impl Generated {
                     source,
                 }
             })?;
+            crate::fsutil::apply_probed_mode(&tmp, mode);
             pending.push((tmp, path));
         }
         for (tmp, path) in pending {

@@ -285,6 +285,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
         .with_context(|| format!("creating a temporary file in {}", dir.display()))?;
     std::io::Write::write_all(&mut tmp, text.as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
+    crate::fsutil::apply_probed_mode(&tmp, crate::fsutil::probe_umask_mode(dir));
     tmp.persist(path)
         .with_context(|| format!("replacing {}", path.display()))?;
     Ok(())

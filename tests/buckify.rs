@@ -185,6 +185,43 @@ impl Fixture {
     }
 }
 
+/// TD-S4-05: the temp-file-and-rename write path must give generated files
+/// the same mode a plain `std::fs::write` would have produced, not
+/// `tempfile`'s hardcoded `0600`. The expectation is computed at runtime
+/// from a probe file in the same directory, so this passes under any
+/// umask.
+#[cfg(unix)]
+#[test]
+fn generated_files_get_the_umask_derived_mode_not_tempfiles_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    f.cmd().arg("buckify").assert().success();
+
+    let dir = f.dir.path().join("third-party/js");
+    let probe = dir.join(".mode-probe-expected");
+    std::fs::write(&probe, b"x").unwrap();
+    let expected = std::fs::metadata(&probe).unwrap().permissions().mode() & 0o777;
+    std::fs::remove_file(&probe).unwrap();
+
+    for rel in ["packages.toml", "BUCK", "pudu.bzl", "config/BUCK"] {
+        let mode = std::fs::metadata(f.path(rel)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, expected,
+            "{rel} should have the umask-derived mode {expected:o}, got {mode:o}"
+        );
+        // Only meaningful when the umask makes 0600 the *wrong* answer.
+        // Under `umask 077` the correct mode IS 0600, and asserting
+        // otherwise would fail on correct behaviour — which is the
+        // hardcoded assumption computing `expected` at runtime exists to
+        // avoid.
+        if expected != 0o600 {
+            assert_ne!(mode, 0o600, "{rel} must not be left at tempfile's 0600");
+        }
+    }
+}
+
 #[test]
 fn buckify_writes_three_files_and_a_second_run_is_byte_identical() {
     let f = Fixture::new();

@@ -8,6 +8,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod fetch;
+mod fsutil;
 pub mod lock;
 pub mod packages;
 pub mod platform;
