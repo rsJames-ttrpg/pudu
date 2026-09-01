@@ -22,9 +22,13 @@ use crate::platform::prune::prune;
 use crate::registry::tarball_url;
 
 /// Everything the download pass needs, computed with no network at all.
+///
+/// `pub(crate)` because `buckify` needs the same expected set: the packages
+/// it must find in the table are exactly the packages `vendor` would have
+/// fetched. A second implementation would be a second thing to keep in step.
 #[derive(Debug)]
-struct Plan {
-    expected: BTreeMap<String, Expected>,
+pub(crate) struct Plan {
+    pub(crate) expected: BTreeMap<String, Expected>,
     requests: BTreeMap<String, Request>,
     /// `hasBin` as the lockfile records it, for the cross-check.
     has_bin: BTreeMap<String, bool>,
@@ -57,7 +61,7 @@ pub fn run(check: bool, jobs: usize, no_network: bool, verbose: bool) -> Result<
 
 /// Resolve every surviving package to a URL and an integrity, with no
 /// network access. `--check` needs exactly this and nothing more.
-fn build_plan(
+pub(crate) fn build_plan(
     graph: &Graph,
     matrix: &crate::platform::prune::Matrix,
     config: &crate::config::Config,

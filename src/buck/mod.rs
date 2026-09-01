@@ -9,6 +9,13 @@ pub mod config;
 pub mod emit;
 pub mod format;
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use crate::config::Platform;
+use crate::error::BuckError;
+use crate::packages::Entry;
+
 /// The banner every generated file opens with (spec §3).
 ///
 /// Four lines and a trailing newline. `##` rather than `#` so it reads as a
@@ -19,3 +26,62 @@ pub const HEADER: &str = "\
 ## Do not edit by hand.
 ##
 ";
+
+/// The three generated files, rendered but not yet written.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Generated {
+    pub buck: String,
+    pub bzl: String,
+    pub config: String,
+}
+
+impl Generated {
+    /// Each file paired with its path under `third_party_dir`.
+    fn files<'a>(&'a self, third_party_dir: &Path) -> [(PathBuf, &'a str); 3] {
+        [
+            (third_party_dir.join("BUCK"), self.buck.as_str()),
+            (third_party_dir.join("pudu.bzl"), self.bzl.as_str()),
+            (
+                third_party_dir.join("config").join("BUCK"),
+                self.config.as_str(),
+            ),
+        ]
+    }
+
+    pub fn write(&self, third_party_dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(third_party_dir.join("config"))?;
+        for (path, contents) in self.files(third_party_dir) {
+            std::fs::write(path, contents)?;
+        }
+        Ok(())
+    }
+
+    /// The first file whose contents differ from what is on disk.
+    ///
+    /// A missing file counts as differing, which is what makes `--check` in a
+    /// tree that has never been buckified fail rather than pass vacuously.
+    pub fn check(&self, third_party_dir: &Path) -> Result<(), BuckError> {
+        for (path, contents) in self.files(third_party_dir) {
+            let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+            if on_disk != contents {
+                return Err(BuckError::Stale { path });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Render all three files. Pure — no filesystem, no network.
+pub fn generate(
+    entries: &BTreeMap<String, Entry>,
+    platforms: &BTreeMap<String, Platform>,
+    third_party_dir: &Path,
+) -> Result<Generated, BuckError> {
+    // Buck labels are slash-separated regardless of host separator.
+    let label = third_party_dir.to_string_lossy().replace('\\', "/");
+    Ok(Generated {
+        buck: emit::render(entries, &label)?,
+        bzl: bzl::render(),
+        config: config::render(platforms),
+    })
+}

@@ -42,15 +42,17 @@ fn version_prints_the_crate_version() {
 
 /// TD-S0-19: an unimplemented verb exits 4, distinct from a usage error (2)
 /// and from a config failure (3), so CI can branch on it.
+///
+/// `buckify` left this list in S4 — it now has real behaviour, covered by
+/// `tests/buckify.rs` — leaving `audit` as the sole remaining stub.
 #[test]
 fn stubbed_verbs_report_their_stage_and_exit_four() {
-    for (verb, stage) in [("buckify", "S4"), ("audit", "Phase 2")] {
-        let out = pudu().arg(verb).output().unwrap();
-        let text = String::from_utf8(out.stderr).unwrap();
-        assert_eq!(out.status.code(), Some(4), "`{verb}` must exit 4:\n{text}");
-        assert!(text.contains("not implemented yet"), "{text}");
-        assert!(text.contains(stage), "`{verb}` must name {stage}:\n{text}");
-    }
+    let (verb, stage) = ("audit", "Phase 2");
+    let out = pudu().arg(verb).output().unwrap();
+    let text = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(4), "`{verb}` must exit 4:\n{text}");
+    assert!(text.contains("not implemented yet"), "{text}");
+    assert!(text.contains(stage), "`{verb}` must name {stage}:\n{text}");
 }
 
 /// A usage error, not an unimplemented verb: exit 2.
