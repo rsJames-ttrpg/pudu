@@ -6,6 +6,7 @@
 
 pub mod bzl;
 pub mod config;
+pub mod emit;
 pub mod format;
 
 /// The banner every generated file opens with (spec §3).
