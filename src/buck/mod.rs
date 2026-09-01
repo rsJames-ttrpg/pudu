@@ -72,11 +72,22 @@ impl Generated {
 }
 
 /// Render all three files. Pure — no filesystem, no network.
+///
+/// `third_party_dir` here is the label path — cell-relative, exactly as
+/// written in `pudu.toml` — not the absolute, cwd-joined path used to read
+/// and write files. A Buck label cannot express a filesystem-absolute path,
+/// so an absolute `third_party_dir` is rejected here rather than emitting a
+/// `load("///...")` that buck2 cannot parse.
 pub fn generate(
     entries: &BTreeMap<String, Entry>,
     platforms: &BTreeMap<String, Platform>,
     third_party_dir: &Path,
 ) -> Result<Generated, BuckError> {
+    if third_party_dir.is_absolute() {
+        return Err(BuckError::AbsoluteThirdPartyDir {
+            path: third_party_dir.to_path_buf(),
+        });
+    }
     // Buck labels are slash-separated regardless of host separator.
     let label = third_party_dir.to_string_lossy().replace('\\', "/");
     Ok(Generated {

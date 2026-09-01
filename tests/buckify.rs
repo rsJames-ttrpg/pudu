@@ -323,10 +323,21 @@ fn the_pure_js_fixture_emits_stable_output() {
     common::pudu(tmp.path()).arg("buckify").assert().success();
 
     let tp = tmp.path().join("third-party/js");
-    insta::assert_snapshot!(
-        "pure_js_BUCK",
-        std::fs::read_to_string(tp.join("BUCK")).unwrap()
+    let buck = std::fs::read_to_string(tp.join("BUCK")).unwrap();
+
+    // The label is a Buck cell path, not a filesystem path. This bug shipped
+    // through four tasks because emit.rs's unit test passes a relative label
+    // by hand and nothing asserted on the CLI's own output.
+    assert!(
+        buck.contains(r#"load("//third-party/js:pudu.bzl""#),
+        "the load label must be cell-relative: {buck}"
     );
+    assert!(
+        !buck.contains(r#"load("///"#),
+        "absolute path leaked into the label"
+    );
+
+    insta::assert_snapshot!("pure_js_BUCK", buck);
     insta::assert_snapshot!(
         "pure_js_pudu_bzl",
         std::fs::read_to_string(tp.join("pudu.bzl")).unwrap()
@@ -334,6 +345,39 @@ fn the_pure_js_fixture_emits_stable_output() {
     insta::assert_snapshot!(
         "pure_js_config_BUCK",
         std::fs::read_to_string(tp.join("config/BUCK")).unwrap()
+    );
+}
+
+#[test]
+fn an_absolute_third_party_dir_is_rejected_rather_than_emitting_an_unparseable_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let abs = dir.path().join("third-party/js");
+    let config = format!(
+        "lockfile_path = \"pnpm-lock.yaml\"\nthird_party_dir = \"{}\"\n\n\
+         [platforms.linux-x64-gnu]\nos = \"linux\"\ncpu = \"x64\"\nlibc = \"glibc\"\n",
+        abs.display()
+    );
+    std::fs::write(dir.path().join("pudu.toml"), config).unwrap();
+    std::fs::write(
+        dir.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )
+    .unwrap();
+
+    let out = common::pudu(dir.path()).arg("buckify").output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "InputInvalid, not a panic or a silently-written unparseable BUCK"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("pudu::buckify::absolute_third_party_dir"),
+        "{stderr}"
+    );
+    assert!(
+        !abs.join("BUCK").exists(),
+        "no file may be written on failure"
     );
 }
 

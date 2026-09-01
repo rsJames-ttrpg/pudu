@@ -4,7 +4,8 @@
 //! it in the vendor-oracle job. Its value is scale — the fixture in
 //! `tests/buckify.rs` has four packages, and 18 of this lockfile's entries
 //! are space-rooted `@types` packages, so this exercises spec §1.1 at volume
-//! for free.
+//! for free (the printed `non_standard_roots` count is a coarse proxy for
+//! that 18, not an exact match — see the filter's own comment).
 
 mod common;
 
@@ -66,22 +67,33 @@ fn buckify_on_the_real_lockfile_is_deterministic() {
 
     let buck = &first[0];
     let packages = buck.matches("npm_package(").count();
-    assert!(
-        packages > 300,
-        "expected the full store, got {packages} packages"
+    // Exact, not a floor: both inputs are pinned (the committed lockfile in
+    // tests/fixtures/lock/real, and CONFIG's two platforms above), and
+    // pruning is deterministic, so the package count is a fixed number, not
+    // a range. A looser bound like `> 300` would not catch a 20-package
+    // pruning regression.
+    assert_eq!(
+        packages, 322,
+        "expected the full store (322 packages for this pinned lockfile/platform pair), got {packages}"
     );
 
     // The 18 space-rooted `@types` entries are the reason this test exists at
-    // scale rather than only in the four-package fixture.
-    let space_rooted = buck
+    // scale rather than only in the four-package fixture. `root = "package"`
+    // is the overwhelmingly common case, so counting roots that are anything
+    // else is a much closer proxy for "space-rooted" than a line filter that
+    // (bug, since fixed) matched almost every line regardless of content.
+    // Still approximate — a non-`package` root need not contain a space —
+    // so this stays a printed observation, not an assertion pinned to 18.
+    let non_standard_roots = buck
         .lines()
-        .filter(|l| l.trim_start().starts_with("root = ") && l.contains(' ') && l.contains("v"))
+        .filter_map(|l| l.trim().strip_prefix("root = "))
+        .filter(|r| *r != "\"package\",")
         .count();
 
     // Spec exit criterion 5 asks for these numbers; `--nocapture` prints them.
     eprintln!(
         "buckify scale: {packages} packages, BUCK {} bytes, {elapsed:?}, \
-         {space_rooted} candidate space-rooted entries",
+         {non_standard_roots} non-standard-root (candidate space-rooted) entries",
         buck.len()
     );
 

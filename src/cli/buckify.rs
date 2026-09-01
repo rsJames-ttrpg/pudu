@@ -62,10 +62,12 @@ pub fn run(check: bool) -> Result<()> {
 
     // The load() label is a Buck cell path (relative to the cell root), not
     // a filesystem path — `third_party_dir` above is absolute (joined with
-    // cwd) for reading and writing files, but passing that absolute path
-    // here would emit `load("///tmp/.../third-party/js:pudu.bzl", ...)`,
-    // which is not a valid Buck label. `config.third_party_dir` is the
-    // relative path straight from pudu.toml, which is what a label needs.
+    // cwd) for reading and writing files, so `config.third_party_dir` (the
+    // relative path straight from pudu.toml) is what goes into the label
+    // instead. `buck::generate` itself refuses an absolute
+    // `third_party_dir` with `BuckError::AbsoluteThirdPartyDir` — config.rs
+    // permits one (nothing there requires relative), so the guarantee that
+    // a `load("///...")` is never emitted lives here, not in validation.
     let generated = buck::generate(entries, &config.platforms, &config.third_party_dir)?;
 
     if check {

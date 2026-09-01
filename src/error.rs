@@ -605,6 +605,15 @@ pub enum BuckError {
         )
     )]
     UnrepresentableBinName { package: String, name: String },
+
+    #[error("third_party_dir must be relative to the repository root, but is `{}`", path.display())]
+    #[diagnostic(
+        code(pudu::buckify::absolute_third_party_dir),
+        help(
+            "the generated BUCK loads `//<third_party_dir>:pudu.bzl`, and a Buck label is a cell-relative path. An absolute path cannot be expressed as one. Set `third_party_dir` in pudu.toml to a path relative to the repository root."
+        )
+    )]
+    AbsoluteThirdPartyDir { path: PathBuf },
 }
 
 impl BuckError {
@@ -616,6 +625,9 @@ impl BuckError {
             // The offending value came from `packages.toml`, not from the
             // command line, so this is input-invalid rather than usage.
             BuckError::UnrepresentableBinName { .. } => ExitCode::InputInvalid,
+            // The offending value came from pudu.toml, not from the command
+            // line, so this is input-invalid too.
+            BuckError::AbsoluteThirdPartyDir { .. } => ExitCode::InputInvalid,
         }
     }
 }

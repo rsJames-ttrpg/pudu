@@ -91,7 +91,7 @@ jobs:
       - name: install buck2 (pinned release)
         run: |
           mkdir -p "$HOME/.local/bin"
-          curl -sSL -o buck2.zst https://github.com/facebook/buck2/releases/download/2026-08-22/buck2-x86_64-unknown-linux-gnu.zst
+          curl -fsSL -o buck2.zst https://github.com/facebook/buck2/releases/download/2026-08-22/buck2-x86_64-unknown-linux-gnu.zst
           zstd -d buck2.zst -o "$HOME/.local/bin/buck2"
           chmod +x "$HOME/.local/bin/buck2"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
