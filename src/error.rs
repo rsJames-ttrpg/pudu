@@ -560,13 +560,17 @@ impl VendorError {
     pub fn exit_code(&self) -> ExitCode {
         match self {
             VendorError::Stale { .. } => ExitCode::Stale,
-            // A registry that is down or refusing, or a cache write failure,
-            // is not the user's input being invalid, so these stay
-            // unclassified rather than claiming pudu.toml or the lockfile is
-            // at fault.
+            // A registry that is down or refusing, and either half of the
+            // cache being unusable, are properties of the environment rather
+            // than of the user's input, so these stay unclassified rather
+            // than claiming pudu.toml or the lockfile is at fault. A machine
+            // with no `$HOME` must not be told its config is wrong — and
+            // `CacheUnavailable` and `CacheWriteFailed` carry the same help
+            // text, so they cannot sensibly carry different exit codes.
             VendorError::HttpStatus { .. }
             | VendorError::Transport { .. }
-            | VendorError::CacheWriteFailed { .. } => ExitCode::Internal,
+            | VendorError::CacheWriteFailed { .. }
+            | VendorError::CacheUnavailable => ExitCode::Internal,
             VendorError::UnsupportedResolution { .. }
             | VendorError::IntegrityMismatch { .. }
             | VendorError::MalformedTarball { .. }
@@ -574,8 +578,7 @@ impl VendorError {
             | VendorError::MalformedIntegrity { .. }
             | VendorError::BadDerivedUrl { .. }
             | VendorError::SidecarMalformed { .. }
-            | VendorError::NetworkDisabled { .. }
-            | VendorError::CacheUnavailable => ExitCode::InputInvalid,
+            | VendorError::NetworkDisabled { .. } => ExitCode::InputInvalid,
         }
     }
 }
@@ -1018,7 +1021,7 @@ mod tests {
 
     #[test]
     fn exit_codes_are_classified() {
-        let cases: [(anyhow::Error, ExitCode); 8] = [
+        let cases: [(anyhow::Error, ExitCode); 10] = [
             (
                 CliError::Unimplemented {
                     verb: "vendor".into(),
@@ -1062,6 +1065,21 @@ mod tests {
                     key: "left-pad@1.3.0".to_string(),
                     url: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".to_string(),
                     status: 503,
+                }),
+                ExitCode::Internal,
+            ),
+            // Both halves of "the cache is unusable" are environment
+            // failures carrying identical help text, so they must classify
+            // identically. `CacheUnavailable` used to be 3, telling a user
+            // whose machine has no `$HOME` that their config was wrong.
+            (
+                anyhow::Error::from(VendorError::CacheUnavailable),
+                ExitCode::Internal,
+            ),
+            (
+                anyhow::Error::from(VendorError::CacheWriteFailed {
+                    path: "/read-only/pudu".into(),
+                    source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
                 }),
                 ExitCode::Internal,
             ),

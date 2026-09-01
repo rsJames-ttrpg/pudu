@@ -21,8 +21,13 @@ impl Cache {
     ///
     /// `PUDU_CACHE_DIR` exists so the integration tests are hermetic; it is
     /// deliberately not advertised in `--help`.
+    ///
+    /// A set-but-empty value is treated as unset. `PUDU_CACHE_DIR=""` is what
+    /// a CI system writes for a variable it defines but never fills in, and
+    /// an empty `PathBuf` is the *relative* root — it would silently grow a
+    /// `tarballs/` tree inside the user's repository.
     pub fn open() -> Result<Self, VendorError> {
-        let root = match std::env::var_os("PUDU_CACHE_DIR") {
+        let root = match std::env::var_os("PUDU_CACHE_DIR").filter(|v| !v.is_empty()) {
             Some(v) => PathBuf::from(v),
             None => dirs::cache_dir()
                 .ok_or(VendorError::CacheUnavailable)?
@@ -160,6 +165,9 @@ mod tests {
         assert_eq!(c.get("p@1.0.0", &i), Some(bytes));
     }
 
+    /// Bundled into the one environment-reading test rather than added as a
+    /// second: `open()` reads process-global state, so two such tests could
+    /// not run in parallel.
     #[test]
     fn pudu_cache_dir_overrides_the_os_cache_directory() {
         // `open()` reads the environment, which is process-global, so this
@@ -170,6 +178,19 @@ mod tests {
         unsafe { std::env::set_var("PUDU_CACHE_DIR", dir.path()) };
         let c = Cache::open().unwrap();
         assert_eq!(c.root(), dir.path());
+
+        // A set-but-blank variable must fall back to the OS cache directory,
+        // not root the cache at the (relative) empty path — which in CI means
+        // a `tarballs/` tree appearing inside the checked-out repository.
+        unsafe { std::env::set_var("PUDU_CACHE_DIR", "") };
+        let blank = Cache::open().unwrap();
+        assert_ne!(
+            blank.root(),
+            Path::new(""),
+            "an empty PUDU_CACHE_DIR must not root the cache in the working tree"
+        );
+        assert_eq!(blank.root(), dirs::cache_dir().unwrap().join("pudu"));
+
         match previous {
             Some(v) => unsafe { std::env::set_var("PUDU_CACHE_DIR", v) },
             None => unsafe { std::env::remove_var("PUDU_CACHE_DIR") },
