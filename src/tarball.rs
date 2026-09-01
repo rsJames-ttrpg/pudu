@@ -823,6 +823,31 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_or_dot_bin_path_is_dropped_without_claiming_it_escapes() {
+        // `contained_path("")` and `contained_path(".")` both yield `None`,
+        // so these take the same branch as `../../etc/passwd`. The drop is
+        // right; the wording has to cover them too.
+        for path in ["", ".", "./"] {
+            let json = format!(r#"{{"name":"p","bin":{{"x":"{path}","ok":"y.js"}}}}"#);
+            let (b, w) = bins_with_warnings(&[("package.json", &json)], "p");
+            assert_eq!(b, BTreeMap::from([("ok".to_string(), "y.js".to_string())]));
+            let msg = w
+                .iter()
+                .find_map(|x| match x {
+                    VendorWarning::BinPathEscapes { name, .. } if name == "x" => {
+                        Some(x.to_string())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected a BinPathEscapes for {path:?}: {w:?}"));
+            assert!(
+                msg.contains("empty"),
+                "the message must cover a path that is not an escape: {msg}"
+            );
+        }
+    }
+
+    #[test]
     fn a_path_that_climbs_then_returns_stays_inside() {
         let b = bins(
             &[(

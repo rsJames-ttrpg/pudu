@@ -615,7 +615,11 @@ pub enum VendorWarning {
     #[diagnostic(severity(Warning), code(pudu::vendor::bin_name_rejected))]
     BinNameRejected { key: String, name: String },
 
-    #[error("{key}: dropping bin `{name}` — its path `{path}` escapes the package")]
+    // `contained_path` returns `None` for three shapes, not one: a path that
+    // climbs out of the package (`../../etc/passwd`), the empty string, and
+    // one that normalizes away to nothing (`.`, `./`). Dropping all three is
+    // right; calling all three an escape is not.
+    #[error("{key}: dropping bin `{name}` — its path `{path}` is empty or escapes the package")]
     #[diagnostic(severity(Warning), code(pudu::vendor::bin_path_escapes))]
     BinPathEscapes {
         key: String,
