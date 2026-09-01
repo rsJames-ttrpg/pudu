@@ -70,8 +70,14 @@ This makes `pudu.lock` a function of `pudu.toml` as well as of the lockfile:
 adding a platform makes the sidecar stale, and `--check` catches it. That is
 the intended behaviour, not a side effect.
 
-An empty `[platforms]` table means there is nothing to vendor; `vendor` errors
-with `NoPlatformsConfigured` rather than writing an empty sidecar.
+An empty `[platforms]` table means there is nothing to vendor, and `vendor`
+errors rather than writing an empty sidecar. No `vendor`-specific check is
+needed for that: `vendor` calls `load_validated()` unconditionally, and
+`Config::validate` already rejects an empty `[platforms]` table with
+`ConfigError::NoPlatforms` (exit 3). An earlier draft of this section
+mandated a separate `NoPlatformsConfigured` variant; it was unreachable by
+construction and has been removed. The integration test still asserts the
+behaviour, through the `ConfigError` path.
 
 Several snapshot keys can share one tarball — peer-dependency instances of the
 same package@version differ only in their edges. The download set is therefore
@@ -376,7 +382,6 @@ every variant renders with a `code` and maps to an exit code by construction:
 | `MalformedTarball { key, reason }` | 3 |
 | `MissingPackageJson { key }` | 3 |
 | `SidecarMalformed { path, reason }` | 3 |
-| `NoPlatformsConfigured` | 3 |
 | `NetworkDisabled { key, url }` | 3 |
 | `HttpStatus { key, url, status }` | 1 |
 | `Transport { key, url, source }` | 1 |

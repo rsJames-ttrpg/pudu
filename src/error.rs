@@ -499,13 +499,6 @@ pub enum VendorError {
     )]
     SidecarMalformed { path: PathBuf, reason: String },
 
-    #[error("no platforms configured, so there is nothing to vendor")]
-    #[diagnostic(
-        code(pudu::vendor::no_platforms),
-        help("add at least one `[platforms.<name>]` table to pudu.toml")
-    )]
-    NoPlatformsConfigured,
-
     #[error("{key}: {url} is not in the cache and --no-network was given")]
     #[diagnostic(
         code(pudu::vendor::network_disabled),
@@ -581,7 +574,6 @@ impl VendorError {
             | VendorError::MalformedIntegrity { .. }
             | VendorError::BadDerivedUrl { .. }
             | VendorError::SidecarMalformed { .. }
-            | VendorError::NoPlatformsConfigured
             | VendorError::NetworkDisabled { .. }
             | VendorError::CacheUnavailable => ExitCode::InputInvalid,
         }
@@ -1059,7 +1051,10 @@ mod tests {
                 ExitCode::Stale,
             ),
             (
-                anyhow::Error::from(VendorError::NoPlatformsConfigured),
+                anyhow::Error::from(VendorError::NetworkDisabled {
+                    key: "left-pad@1.3.0".to_string(),
+                    url: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".to_string(),
+                }),
                 ExitCode::InputInvalid,
             ),
             (
@@ -1111,7 +1106,11 @@ mod tests {
             ),
             (
                 "VendorError",
-                VendorError::NoPlatformsConfigured.into(),
+                VendorError::NetworkDisabled {
+                    key: "left-pad@1.3.0".to_string(),
+                    url: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".to_string(),
+                }
+                .into(),
                 ExitCode::InputInvalid,
             ),
         ]

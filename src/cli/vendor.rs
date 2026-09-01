@@ -31,10 +31,11 @@ struct Plan {
 }
 
 pub fn run(check: bool, jobs: usize, no_network: bool, verbose: bool) -> Result<()> {
+    // No empty-platforms guard here: `load_validated()` runs
+    // `Config::validate`, which already rejects an empty `[platforms]` table
+    // with `ConfigError::NoPlatforms` (exit 3). A second, unreachable check
+    // was only a second thing to keep in step.
     let (config, lockfile) = load_validated()?;
-    if config.platforms.is_empty() {
-        return Err(VendorError::NoPlatformsConfigured.into());
-    }
 
     let graph = Graph::build(&lockfile)?;
     let (matrix, warnings) = prune(&graph, &config.platforms);
