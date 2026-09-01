@@ -14,5 +14,5 @@ Commands:
 Options:
   -C <PATH>         Change to this directory before running
   -v, --verbose...  Increase log verbosity (-v, -vv)
-      --no-network  Forbid all network access. (No effect until S3.)
+      --no-network  Forbid all network access
   -h, --help        Print help

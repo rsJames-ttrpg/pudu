@@ -3,64 +3,20 @@
 //! Hidden and unstable: these exist to make the pipeline's intermediate
 //! stages testable, and carry no compatibility promise.
 
-use std::path::Path;
-
 use anyhow::Result;
 
-use crate::config::Config;
-use crate::error::{CliError, ConfigError, render};
-use crate::lock::types::Lockfile;
-use crate::lock::{Graph, SUPPORTED_VERSION, parse_lockfile};
+use crate::cli::context::load_lenient;
+use crate::error::render;
+use crate::lock::{Graph, SUPPORTED_VERSION};
 use crate::platform::constraints::constraint_labels;
 use crate::platform::prune::prune;
-
-/// Load `pudu.toml` and the lockfile it names, printing any lockfile
-/// warnings to stderr.
-///
-/// Shared by every `pudu debug` subcommand: they all start from the same
-/// two files, and the not-found/unreadable distinction below is worth
-/// stating once.
-fn load() -> Result<(Config, Lockfile)> {
-    let config_path = Path::new("pudu.toml");
-    let config_text =
-        std::fs::read_to_string(config_path).map_err(|source| CliError::ConfigUnreadable {
-            path: config_path.to_path_buf(),
-            source,
-        })?;
-    let config = Config::from_str(&config_text, config_path)?;
-
-    let base = std::env::current_dir()?;
-    let lockfile_path = base.join(&config.lockfile_path);
-    // Distinguish "not found" from "found but unreadable" (e.g. permissions):
-    // the latter is not a missing-file problem, and telling the user to edit
-    // `lockfile_path` when the path is already correct is actively wrong
-    // advice.
-    let lock_text = std::fs::read_to_string(&lockfile_path).map_err(|source| {
-        if source.kind() == std::io::ErrorKind::NotFound {
-            ConfigError::LockfileNotFound {
-                path: lockfile_path.clone(),
-            }
-        } else {
-            ConfigError::LockfileUnreadable {
-                path: lockfile_path.clone(),
-                source,
-            }
-        }
-    })?;
-
-    let (lockfile, warnings) = parse_lockfile(&lock_text, &lockfile_path)?;
-    for w in &warnings {
-        eprint!("{}", render(w));
-    }
-    Ok((config, lockfile))
-}
 
 /// Print the instance graph as JSON on stdout.
 ///
 /// Warnings go to stderr via [`render`]; the JSON goes to stdout, so stdout
 /// stays machine-parseable.
 pub fn print_graph() -> Result<()> {
-    let (_config, lockfile) = load()?;
+    let (_config, lockfile) = load_lenient()?;
     let graph = Graph::build(&lockfile)?;
     let out = serde_json::json!({
         // The constant, not an observation of the parsed file: `parse_lockfile`
@@ -86,7 +42,7 @@ pub fn print_graph() -> Result<()> {
 /// Every field here is pudu's own invention rather than an echo of the
 /// lockfile, so every key is `snake_case` (S1's key-spelling rule).
 pub fn platforms() -> Result<()> {
-    let (config, lockfile) = load()?;
+    let (config, lockfile) = load_lenient()?;
     let graph = Graph::build(&lockfile)?;
     let (matrix, warnings) = prune(&graph, &config.platforms);
     for w in &warnings {

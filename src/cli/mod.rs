@@ -1,10 +1,12 @@
 //! CLI surface and dispatch.
 
 pub mod config_check;
+pub mod context;
 pub mod debug;
 pub mod init;
 pub mod stub;
 pub mod toolchain;
+pub mod vendor;
 
 use std::path::PathBuf;
 
@@ -25,7 +27,7 @@ pub struct Cli {
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Forbid all network access. (No effect until S3.)
+    /// Forbid all network access.
     #[arg(long, global = true)]
     pub no_network: bool,
 
@@ -48,11 +50,14 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// Fetch tarballs and write pudu.lock. [UNIMPLEMENTED — S3]
+    /// Fetch tarballs and write pudu.lock.
     Vendor {
         /// Exit non-zero if pudu.lock is stale.
         #[arg(long)]
         check: bool,
+        /// Maximum parallel downloads.
+        #[arg(long, value_name = "N", default_value_t = 8)]
+        jobs: usize,
     },
     /// Emit BUCK, pudu.bzl, and config/BUCK. [UNIMPLEMENTED — S4]
     Buckify {
@@ -107,12 +112,14 @@ impl Cli {
             })?;
         }
 
+        let no_network = self.no_network;
+        let verbose = self.verbose > 0;
         match self.command {
             Commands::Init { force, path } => init::run(force, path),
             Commands::Config { command } => match command {
                 ConfigCommands::Check { format } => config_check::run(format),
             },
-            Commands::Vendor { .. } => Err(stub::unimplemented("vendor", "S3")),
+            Commands::Vendor { check, jobs } => vendor::run(check, jobs, no_network, verbose),
             Commands::Buckify { .. } => Err(stub::unimplemented("buckify", "S4")),
             Commands::Fixups => Err(stub::unimplemented("fixups", "S7/S8")),
             Commands::Audit => Err(stub::unimplemented("audit", "Phase 2")),
