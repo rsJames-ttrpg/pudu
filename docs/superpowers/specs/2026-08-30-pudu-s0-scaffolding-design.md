@@ -29,15 +29,19 @@ pudu --help                        # lists all phase-1 verbs
 pudu --version                     # crate version (build id deferred to S9)
 ```
 
-Registered but stubbed — each reports `pudu <verb> is not implemented yet (planned for S<n>)` and exits 4 (§6.1):
+Registered but stubbed at S0 — each reported `pudu <verb> is not implemented yet (planned for S<n>)` and exited 4 (§6.1):
 
 ```
-pudu vendor        # UNIMPLEMENTED (S3)
-pudu buckify       # UNIMPLEMENTED (S4)
+pudu vendor        # UNIMPLEMENTED (S3)   — shipped in S3; no longer stubbed
+pudu buckify       # UNIMPLEMENTED (S4)   — shipped in S4; no longer stubbed
 pudu fixups …      # UNIMPLEMENTED (S7/S8)
 pudu audit         # UNIMPLEMENTED (Phase 2)
 pudu unused        # UNIMPLEMENTED (Phase 2)
 ```
+
+`vendor` and `buckify` have since shipped (S3, S4) and are no longer stubbed;
+this list documents S0's original registration, not the CLI's current
+behaviour. `fixups`, `audit`, and `unused` remain genuinely stubbed as of S4.
 
 Registering the full surface from day one keeps `--help` honest about where the project is going, and lets the help snapshot test lock verb names before any of them have behaviour to rename.
 
