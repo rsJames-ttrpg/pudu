@@ -86,7 +86,9 @@ fn quote(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c if (c as u32) < 0x20 || c as u32 == 0x7F => {
+                out.push_str(&format!("\\u{:04X}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -342,6 +344,34 @@ mod tests {
     }
 
     #[test]
+    fn bin_names_that_are_not_bare_toml_keys_are_quoted() {
+        let mut e = entry("u");
+        e.bin = BTreeMap::from([
+            ("tool".to_string(), "tool.js".to_string()),
+            ("foo.js".to_string(), "foo.js".to_string()),
+            ("$".to_string(), "dollar.js".to_string()),
+            ("it's".to_string(), "its.js".to_string()),
+            (String::new(), "empty.js".to_string()),
+        ]);
+        let original = sidecar(&[("a@1.0.0", e)]);
+        let text = original.render();
+
+        assert!(text.contains("tool = \"tool.js\""), "{text}");
+        assert!(text.contains("\"foo.js\" = \"foo.js\""), "{text}");
+        assert!(text.contains("\"$\" = \"dollar.js\""), "{text}");
+        assert!(text.contains("\"it's\" = \"its.js\""), "{text}");
+        assert!(text.contains("\"\" = \"empty.js\""), "{text}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pudu.lock");
+        std::fs::write(&path, &text).unwrap();
+        let Loaded::Present(parsed) = load(&path).unwrap() else {
+            panic!("expected a parsed sidecar");
+        };
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
     fn render_then_load_round_trips() {
         let mut e = entry("https://example.com/a.tgz");
         e.bin = BTreeMap::from([("a".to_string(), "bin/a.js".to_string())]);
@@ -393,6 +423,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pudu.lock");
         std::fs::write(&path, "version = 1\n\n[\"a@1.0.0\"]\nurl = \"u\"\n").unwrap();
+        assert!(matches!(
+            load(&path).unwrap_err(),
+            VendorError::SidecarMalformed { .. }
+        ));
+    }
+
+    #[test]
+    fn an_entry_with_an_unknown_field_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pudu.lock");
+        std::fs::write(
+            &path,
+            "version = 1\n\n[\"a@1.0.0\"]\nurl = \"u\"\nsha512 = \"sha512-AAAA\"\nsha256 = \"ff00\"\nsize = 42\nmystery = \"x\"\n",
+        )
+        .unwrap();
         assert!(matches!(
             load(&path).unwrap_err(),
             VendorError::SidecarMalformed { .. }
