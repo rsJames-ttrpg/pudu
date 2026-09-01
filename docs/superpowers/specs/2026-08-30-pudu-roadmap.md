@@ -265,7 +265,7 @@ S1 and S2 can be developed in parallel after S0; both feed S3.
 | S0 | [2026-08-30-pudu-s0-scaffolding-design.md](./2026-08-30-pudu-s0-scaffolding-design.md) | [2026-08-30-pudu-s0-scaffolding.md](../plans/2026-08-30-pudu-s0-scaffolding.md) | ✅ shipped (18 commits, 78 tests) |
 | S1 | [2026-08-31-pudu-s1-lockfile-design.md](./2026-08-31-pudu-s1-lockfile-design.md) | [2026-08-31-pudu-s1-lockfile.md](../plans/2026-08-31-pudu-s1-lockfile.md) | ✅ shipped |
 | S2 | [2026-08-31-pudu-s2-platforms-design.md](./2026-08-31-pudu-s2-platforms-design.md) | [2026-08-31-pudu-s2-platforms.md](../plans/2026-08-31-pudu-s2-platforms.md) | ✅ shipped (17 commits, 247 tests) |
-| S3 | [2026-08-31-pudu-s3-vendor-design.md](./2026-08-31-pudu-s3-vendor-design.md) | (not yet written) | ⬜ next |
+| S3 | [2026-08-31-pudu-s3-vendor-design.md](./2026-08-31-pudu-s3-vendor-design.md) | [2026-08-31-pudu-s3-vendor.md](../plans/2026-08-31-pudu-s3-vendor.md) | ✅ shipped |
 | S4–S9 | (not yet written) | (not yet written) | ⬜ planned |
 
 ---
