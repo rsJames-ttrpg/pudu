@@ -46,9 +46,9 @@ pub enum ExitCode {
     InputInvalid = 3,
     /// The verb is registered but not implemented yet.
     Unimplemented = 4,
-    /// `pudu vendor --check` found `pudu.lock` out of date. Distinct from
-    /// `InputInvalid` so CI can tell "regenerate the sidecar" from "your
-    /// config is wrong" without parsing the message.
+    /// `pudu vendor --check` found `packages.toml` out of date. Distinct from
+    /// `InputInvalid` so CI can tell "regenerate the package table" from
+    /// "your config is wrong" without parsing the message.
     Stale = 5,
 }
 
@@ -424,7 +424,7 @@ fn capped_list(items: &[String], cap: usize) -> String {
 /// Failures of `pudu vendor`.
 #[derive(Debug, Error, Diagnostic)]
 pub enum VendorError {
-    #[error("pudu.lock is out of date ({} difference(s))", differences.len())]
+    #[error("packages.toml is out of date ({} difference(s))", differences.len())]
     #[diagnostic(
         severity(Error),
         code(pudu::vendor::stale),
@@ -495,7 +495,7 @@ pub enum VendorError {
     #[error("cannot read {path}: {reason}")]
     #[diagnostic(
         code(pudu::vendor::table_malformed),
-        help("pudu.lock is generated; delete it and run `pudu vendor` to rebuild it")
+        help("packages.toml is generated; delete it and run `pudu vendor` to rebuild it")
     )]
     TableMalformed { path: PathBuf, reason: String },
 
@@ -587,7 +587,7 @@ impl VendorError {
 ///
 /// Every one of these is a property of somebody's published package rather
 /// than of pudu's input being malformed, and none makes the rest of the
-/// sidecar wrong.
+/// package table wrong.
 #[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
 pub enum VendorWarning {
     #[error(
@@ -1049,7 +1049,9 @@ mod tests {
             (anyhow::anyhow!("disk on fire"), ExitCode::Internal),
             (
                 anyhow::Error::from(VendorError::Stale {
-                    differences: vec!["pudu.lock has no entry for `left-pad@1.3.0`".to_string()],
+                    differences: vec![
+                        "packages.toml has no entry for `left-pad@1.3.0`".to_string(),
+                    ],
                 }),
                 ExitCode::Stale,
             ),

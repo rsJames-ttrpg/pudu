@@ -1,6 +1,6 @@
 //! Tarball verification and inspection.
 //!
-//! One pass over the bytes answers everything `pudu.lock` records that
+//! One pass over the bytes answers everything `packages.toml` records that
 //! `pnpm-lock.yaml` cannot: the sha256 Buck can verify, the compressed size,
 //! the bin map, and whether the package runs an install script.
 //!
@@ -28,7 +28,7 @@ pub struct Inspection {
     ///
     /// Usually `package`, but not always: every `@types/*` package nests
     /// under its own display name instead (`estree`, `node v22.20`). It is
-    /// recorded rather than recomputed because the sidecar is the only
+    /// recorded rather than recomputed because the package table is the only
     /// offline input a later build-rule pass has, and re-deriving it would
     /// mean re-downloading every tarball.
     pub root: String,

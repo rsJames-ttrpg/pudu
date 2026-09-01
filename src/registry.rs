@@ -3,7 +3,7 @@
 //! `<registry>/<name>/-/<basename>-<version>.tgz`, where `basename` is the
 //! package name after its scope. Verified exact against 400 live registry
 //! manifests — see the tarball survey, §1. Private registries are why the
-//! resolved URL is recorded in `pudu.lock` rather than re-derived later.
+//! resolved URL is recorded in `packages.toml` rather than re-derived later.
 
 use url::Url;
 

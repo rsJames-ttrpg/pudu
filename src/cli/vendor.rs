@@ -1,8 +1,8 @@
-//! `pudu vendor` — the download pass and the `pudu.lock` sidecar.
+//! `pudu vendor` — the download pass and the `packages.toml` package table.
 //!
 //! Vendors the union of packages surviving S2's pruning on at least one
-//! configured platform. That makes `pudu.lock` a function of `pudu.toml` as
-//! well as of the lockfile: adding a platform makes the sidecar stale, and
+//! configured platform. That makes `packages.toml` a function of `pudu.toml`
+//! as well as of the lockfile: adding a platform makes the table stale, and
 //! `--check` catches it. Intended, not incidental — a config change genuinely
 //! changes which tarballs the build needs.
 
@@ -46,7 +46,7 @@ pub fn run(check: bool, jobs: usize, no_network: bool, verbose: bool) -> Result<
     let plan = build_plan(&graph, &matrix, &config)?;
 
     let base = std::env::current_dir()?;
-    let table_path = base.join(&config.third_party_dir).join("pudu.lock");
+    let table_path = base.join(&config.third_party_dir).join("packages.toml");
     let loaded = packages::load(&table_path)?;
 
     if check {
@@ -135,7 +135,7 @@ fn build_plan(
     Ok(plan)
 }
 
-/// Whether an existing sidecar entry already reflects `req`, so no fetch is
+/// Whether an existing table entry already reflects `req`, so no fetch is
 /// needed.
 ///
 /// Both fields must match. The URL alone is not enough: a package can move
@@ -151,7 +151,10 @@ fn is_carried_over(existing: Option<&Entry>, req: &Request) -> bool {
 fn run_check(plan: &Plan, loaded: &Loaded) -> Result<()> {
     let differences = packages::staleness(&plan.expected, loaded);
     if differences.is_empty() {
-        eprintln!("pudu.lock is up to date ({} packages)", plan.expected.len());
+        eprintln!(
+            "packages.toml is up to date ({} packages)",
+            plan.expected.len()
+        );
         return Ok(());
     }
     // The error carries the count; the detail goes out here so the user sees
@@ -181,7 +184,7 @@ fn run_vendor(
     // Carry over anything already recorded at the same URL and hash. A
     // one-package version bump costs one download. The trade is explicit: a
     // recorded sha256 is never re-checked against upstream once written,
-    // which is also what makes pudu.lock an audit artifact.
+    // which is also what makes `packages.toml` an audit artifact.
     let mut entries: BTreeMap<String, Entry> = BTreeMap::new();
     let mut todo: Vec<Request> = Vec::new();
     let mut unchanged = 0usize;
@@ -270,7 +273,7 @@ fn run_vendor(
 }
 
 /// Write via a temporary file and rename, so an interrupted run leaves the
-/// previous sidecar intact rather than a half-written one.
+/// previous table intact rather than a half-written one.
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

@@ -38,7 +38,7 @@ struct OracleEntry {
 }
 
 #[derive(serde::Deserialize)]
-struct SidecarEntry {
+struct TableEntry {
     url: String,
     root: String,
     #[serde(default)]
@@ -48,11 +48,11 @@ struct SidecarEntry {
 }
 
 #[derive(serde::Deserialize)]
-struct Sidecar {
+struct Table {
     #[allow(dead_code)]
     version: u32,
     #[serde(flatten)]
-    entries: BTreeMap<String, SidecarEntry>,
+    entries: BTreeMap<String, TableEntry>,
 }
 
 const CONFIG: &str = r#"
@@ -100,16 +100,16 @@ fn the_vendor_pass_agrees_with_the_registry_on_every_package() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let text = std::fs::read_to_string(dir.path().join("third-party/js/pudu.lock")).unwrap();
-    let sidecar: Sidecar = toml::from_str(&text).unwrap();
+    let text = std::fs::read_to_string(dir.path().join("third-party/js/packages.toml")).unwrap();
+    let table: Table = toml::from_str(&text).unwrap();
 
     assert!(
-        !sidecar.entries.is_empty(),
+        !table.entries.is_empty(),
         "the vendor pass recorded nothing"
     );
 
     let mut mismatches: Vec<String> = Vec::new();
-    for (key, got) in &sidecar.entries {
+    for (key, got) in &table.entries {
         if got.root.is_empty() {
             mismatches.push(format!("{key}: recorded no archive root"));
         }
@@ -145,7 +145,7 @@ fn the_vendor_pass_agrees_with_the_registry_on_every_package() {
     // The vendored set must be the *union* across platforms, not one
     // platform's view and not everything in the lockfile. Three named
     // packages pin all three directions:
-    let vendored: BTreeSet<&String> = sidecar.entries.keys().collect();
+    let vendored: BTreeSet<&String> = table.entries.keys().collect();
     assert!(
         vendored.contains(&"fsevents@2.3.3".to_string()),
         "fsevents is darwin-only; vendoring it proves the set is a union, not one platform's view"
@@ -165,7 +165,7 @@ fn the_vendor_pass_agrees_with_the_registry_on_every_package() {
     // comment. pudu reads the tarball, which is the ground truth pnpm itself
     // would build from.
     assert_eq!(
-        sidecar
+        table
             .entries
             .get("fsevents@2.3.3")
             .map(|e| e.has_install_script),
@@ -173,16 +173,16 @@ fn the_vendor_pass_agrees_with_the_registry_on_every_package() {
         "fsevents ships a prebuilt binary in its tarball; no install script or binding.gyp is actually present, despite the registry manifest claiming otherwise"
     );
     // `@types/*` tarballs are published by DefinitelyTyped's types-publisher
-    // and nest under the package's display name, not `package/`. The sidecar
+    // and nest under the package's display name, not `package/`. The table
     // must record what the archive actually says, since it is the only input
     // a later build-rule pass has.
     assert_eq!(
-        sidecar.entries.get("@types/estree@1.0.9").map(|e| &e.root),
+        table.entries.get("@types/estree@1.0.9").map(|e| &e.root),
         Some(&"estree".to_string()),
         "a non-`package` root must be recorded verbatim"
     );
     assert_eq!(
-        sidecar
+        table
             .entries
             .get("@babel/parser@7.29.8")
             .map(|e| e.bin.clone()),

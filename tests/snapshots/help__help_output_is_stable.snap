@@ -9,7 +9,7 @@ Usage: pudu [OPTIONS] <COMMAND>
 Commands:
   init     Scaffold a pudu project
   config   Inspect pudu.toml
-  vendor   Fetch tarballs and write pudu.lock
+  vendor   Fetch tarballs and write packages.toml
   buckify  Emit BUCK, pudu.bzl, and config/BUCK. [UNIMPLEMENTED — S4]
   fixups   Manage the community fixup registry. [UNIMPLEMENTED — S7/S8]
   audit    Cross-check the lockfile against advisories. [UNIMPLEMENTED — Phase 2]
