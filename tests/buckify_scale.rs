@@ -1,11 +1,11 @@
 //! Buckify over the 328-package real lockfile.
 //!
 //! `#[ignore]`d: it needs the network, like `tests/vendor_oracle.rs`. CI runs
-//! it in the vendor-oracle job. Its value is scale — the fixture in
-//! `tests/buckify.rs` has four packages, and 18 of this lockfile's entries
-//! are space-rooted `@types` packages, so this exercises spec §1.1 at volume
-//! for free (the printed `non_standard_roots` count is a coarse proxy for
-//! that 18, not an exact match — see the filter's own comment).
+//! it in the vendor-oracle job. Its value is scale and determinism at scale —
+//! the hermetic fixture in `tests/buckify.rs` has four packages. Space-rooted
+//! `@types` archives are covered there and by the buck2 job, which builds
+//! them; counting them here only ever produced a number that disagreed with
+//! reality.
 
 mod common;
 
@@ -77,23 +77,9 @@ fn buckify_on_the_real_lockfile_is_deterministic() {
         "expected the full store (322 packages for this pinned lockfile/platform pair), got {packages}"
     );
 
-    // The 18 space-rooted `@types` entries are the reason this test exists at
-    // scale rather than only in the four-package fixture. `root = "package"`
-    // is the overwhelmingly common case, so counting roots that are anything
-    // else is a much closer proxy for "space-rooted" than a line filter that
-    // (bug, since fixed) matched almost every line regardless of content.
-    // Still approximate — a non-`package` root need not contain a space —
-    // so this stays a printed observation, not an assertion pinned to 18.
-    let non_standard_roots = buck
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("root = "))
-        .filter(|r| *r != "\"package\",")
-        .count();
-
     // Spec exit criterion 5 asks for these numbers; `--nocapture` prints them.
     eprintln!(
-        "buckify scale: {packages} packages, BUCK {} bytes, {elapsed:?}, \
-         {non_standard_roots} non-standard-root (candidate space-rooted) entries",
+        "buckify scale: {packages} packages, BUCK {} bytes, {elapsed:?}",
         buck.len()
     );
 
