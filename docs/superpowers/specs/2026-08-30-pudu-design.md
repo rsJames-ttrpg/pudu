@@ -66,7 +66,7 @@ repo/
 └── third-party/js/
     ├── BUCK                    # generated; do not edit
     ├── pudu.bzl                # generated helper macros
-    ├── pudu.lock               # generated; committed (see §4)
+    ├── packages.toml           # generated; committed (see §4)
     ├── config/BUCK             # generated config_setting targets
     ├── fixups/                 # local fixup overrides
     │   └── sharp/fixups.toml
@@ -112,25 +112,25 @@ Platform entries carry **two duties**: the `os` / `cpu` / `libc` values are matc
 
 ---
 
-## 4. `pudu vendor` and the `pudu.lock` sidecar
+## 4. `pudu vendor` and the package table
 
 This is pudu's largest departure from muntjac, and it is forced by a hard constraint.
 
 **The constraint.** npm records integrity as `sha512-<base64>`. Buck2's `http_archive` and `http_file` accept `sha1` and `sha256` only (`prelude/http_archive/http_archive.bzl` passes exactly those to `ctx.actions.download_file`). There is no path from the lockfile's hash to a hash Buck can verify.
 
-**The resolution.** `pudu vendor` performs one download pass and writes a committed sidecar at `<third_party_dir>/pudu.lock`. The pass resolves four things the lockfile cannot supply:
+**The resolution.** `pudu vendor` performs one download pass and writes a committed package table at `<third_party_dir>/packages.toml`. The pass resolves four things the lockfile cannot supply:
 
 | Recorded | Why `pnpm-lock.yaml` can't supply it |
 |---|---|
-| `sha256`, `size` | Buck cannot verify sha512. The lockfile's sha512 **is** verified during this download, so the trust chain is unbroken: pnpm's hash gates what gets hashed into pudu.lock. |
+| `sha256`, `size` | Buck cannot verify sha512. The lockfile's sha512 **is** verified during this download, so the trust chain is unbroken: pnpm's hash gates what gets hashed into packages.toml. |
 | `url` | Lockfile v9 stores integrity only for registry packages. The URL is derived from name + version + the `[registry]` config, and must be recorded because scope overrides can change it. |
 | `bin` map | Lives in the tarball's `package.json`. Needed to build `node_modules/.bin/` symlinks. The lockfile's `hasBin: true` is only a flag. |
 | `hasInstallScript` | Lockfile v9 does not carry a `requiresBuild` field (v5/v6 did). The §6 script gate needs the real `package.json`. |
 
 **Consequences.**
 
-- `pudu vendor` is **mandatory** before `pudu buckify`, unlike muntjac where `vendor` is a convenience. `buckify` errors precisely when `pudu.lock` is missing or stale for any package.
-- `pudu.lock` is committed. This is a security improvement over trusting a transitively-derived URL: the sha256 actually consumed by the build is auditable in review, and a registry that changes a tarball's bytes fails the build rather than silently succeeding.
+- `pudu vendor` is **mandatory** before `pudu buckify`, unlike muntjac where `vendor` is a convenience. `buckify` errors precisely when `packages.toml` is missing or stale for any package.
+- `packages.toml` is committed. This is a security improvement over trusting a transitively-derived URL: the sha256 actually consumed by the build is auditable in review, and a registry that changes a tarball's bytes fails the build rather than silently succeeding.
 - `pudu vendor --check` is the CI gate for "did someone forget to re-run pudu?"
 
 **Format** (deterministic, sorted by key):
@@ -157,7 +157,7 @@ Keyed on `name@version` (not the snapshot key) because a tarball has no peer dep
 `pudu buckify` flow:
 
 ```
-Input: pnpm-lock.yaml + pudu.toml + pudu.lock + fixups/ + registry cache
+Input: pnpm-lock.yaml + pudu.toml + packages.toml + fixups/ + registry cache
    ↓
 1. Parse pnpm-lock.yaml → importers, packages, snapshots
    ↓
@@ -165,7 +165,7 @@ Input: pnpm-lock.yaml + pudu.toml + pudu.lock + fixups/ + registry cache
    ↓
 3. Platform pruning — filter optionalDependencies by os/cpu/libc
    ↓
-4. Resolve tarballs from pudu.lock (error if stale)
+4. Resolve tarballs from packages.toml (error if stale)
    ↓
 5. Script gate — reject packages with install scripts unless allowlisted
    ↓
@@ -250,7 +250,7 @@ This is the **only** axis of variance. pnpm resolves once, platform-independentl
 - **Determinism.** Same inputs ⇒ byte-identical output. Sort order is lexicographic by snapshot key, then platform.
 - **Precise errors.** A failure names the exact `(package, version, platform)` tuple and points at `pudu fixups show <package>` as the next action.
 - **Pudu never runs pnpm.** No shellout. The lockfile is the contract.
-- **Tarball trust chains through sha512.** The sha256 in `pudu.lock` is only ever written after the lockfile's sha512 verified.
+- **Tarball trust chains through sha512.** The sha256 in `packages.toml` is only ever written after the lockfile's sha512 verified.
 
 ---
 
@@ -375,7 +375,7 @@ npm_package(
     url     = "https://registry.npmjs.org/esbuild/-/esbuild-0.23.0.tgz",
     sha256  = "a5b1e5a2...",
     size    = 89341,
-    root    = "package",              # from pudu.lock; `@types/*` differ
+    root    = "package",              # from packages.toml; `@types/*` differ
     bin     = {"esbuild": "bin/esbuild"},
     visibility = ["PUBLIC"],
 )
@@ -407,9 +407,9 @@ under package/". That is false: DefinitelyTyped's types-publisher nests each
 has 18 such entries.
 
 The value comes from the `root` field S3 records for every package in
-`pudu.lock` (S3 design §6), computed once from the archive itself at vendor
-time. This pass must read it from the sidecar and must not re-derive it —
-`pudu.lock` is the whole offline input here, and deriving the root would mean
+`packages.toml` (S3 design §6), computed once from the archive itself at vendor
+time. This pass must read it from the package table and must not re-derive it —
+`packages.toml` is the whole offline input here, and deriving the root would mean
 re-downloading every tarball.
 
 A package target carries **no dependency attribute and no `select()`**. Dependency
@@ -583,7 +583,7 @@ src/
 │   └── graph.rs            # instance graph construction
 ├── platform.rs             # os/cpu/libc model; npm field matching; constraint mapping
 ├── registry.rs             # tarball URL derivation, scope overrides
-├── sidecar.rs              # pudu.lock read/write
+├── packages.rs              # packages.toml read/write
 ├── tarball.rs              # fetch, sha512 verify, package.json inspection
 ├── scripts.rs              # lifecycle-script gate
 ├── fixup/
@@ -611,7 +611,7 @@ Heaviest coverage on the algorithmically fiddly modules:
 
 ### Snapshot tests (insta)
 
-Each fixture under `tests/fixtures/<scenario>/` holds a minimal `package.json` + `pnpm-lock.yaml` + `pudu.lock` + optional fixups, plus golden output. CI fails on byte mismatch.
+Each fixture under `tests/fixtures/<scenario>/` holds a minimal `package.json` + `pnpm-lock.yaml` + `packages.toml` + optional fixups, plus golden output. CI fails on byte mismatch.
 
 v1 fixtures:
 
@@ -645,7 +645,7 @@ v1 fixtures:
 - **`.bin` sub-target extraction.** `http_archive` exposes `sub_targets`, but referencing a single file inside the extracted archive for a `.bin` symlink needs confirming — the design assumes `//third-party/js:pkg[bin/foo]` works. S4 validates; fallback is a small genrule per bin entry.
 - **Node's symlink realpath behaviour.** Node resolves `node_modules` symlinks to their real paths by default (`--preserve-symlinks` off). Under Buck, the "real path" is buck-out. pnpm relies on the same behaviour and works, so this should hold, but S4's e2e test is the actual proof.
 - **~~Bundled dependencies.~~ Resolved 2026-08-31.** pnpm already omits bundled names from the snapshot graph — the bundled package's snapshot carries no `dependencies` at all — so they never become edges and there is no double-install risk. Pudu parses the field and ignores it.
-- **Registry URL derivation is a heuristic.** `https://<registry>/<name>/-/<basename>-<version>.tgz` holds for npmjs.org and most mirrors, but private registries (Artifactory, Verdaccio) vary. Mitigation: `pudu.lock` records the resolved URL, so a wrong derivation fails loudly at vendor time and `prefer_tarball` overrides it.
+- **Registry URL derivation is a heuristic.** `https://<registry>/<name>/-/<basename>-<version>.tgz` holds for npmjs.org and most mirrors, but private registries (Artifactory, Verdaccio) vary. Mitigation: `packages.toml` records the resolved URL, so a wrong derivation fails loudly at vendor time and `prefer_tarball` overrides it.
 - **Registry repo location undecided.** `github.com/<user>/pudu-fixups` is a placeholder; the real location is a launch-time decision and blocks nothing before the first public release.
 
 ---
@@ -654,7 +654,7 @@ v1 fixtures:
 
 Captured, not committed:
 
-- **Vendor mode.** Commit tarballs under `third-party/js/vendor/`; swap `http_archive(urls=…)` for a local source ref. Air-gapped builds. The `pudu.lock` sidecar already carries everything needed.
+- **Vendor mode.** Commit tarballs under `third-party/js/vendor/`; swap `http_archive(urls=…)` for a local source ref. Air-gapped builds. The `packages.toml` package table already carries everything needed.
 - **`audit` and `unused`.** OSV cross-check against the GitHub Advisory Database; report vendored tarballs no importer references.
 - **Lifecycle-script execution.** Run allowlisted scripts inside a sandboxed Buck rule. Schema hooks already in place (§9 `[scripts]`).
 - **Multi-lockfile trees.** muntjac's `[tree.<name>]` model, for repos with genuinely separate lockfiles.

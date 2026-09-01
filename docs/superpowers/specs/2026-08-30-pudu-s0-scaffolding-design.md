@@ -12,7 +12,7 @@ Stand up the CLI dispatcher, `pudu.toml` parser, error machinery, `pudu init`, a
 
 **Narrower than muntjac's S0.** The crate skeleton, `Cargo.toml` with resolved dependencies, MIT LICENSE, `.gitignore`, three-runner CI, and the fmt+clippy pre-commit gate all landed in the initial scaffolding commit. S0 does not redo them; it extends CI only if a new job is needed.
 
-Out of scope (later stages): lockfile parsing (S1), platform matching logic (S2), vendor and `pudu.lock` (S3), BUCK emission (S4), script gate (S6), fixups (S7/S8).
+Out of scope (later stages): lockfile parsing (S1), platform matching logic (S2), vendor and `packages.toml` (S3), BUCK emission (S4), script gate (S6), fixups (S7/S8).
 
 ---
 
