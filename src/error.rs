@@ -463,12 +463,12 @@ pub enum VendorError {
     #[diagnostic(
         code(pudu::vendor::malformed_tarball),
         help(
-            "npm tarballs nest every entry under `package/`; pudu emits `strip_prefix = \"package\"`, so an archive shaped otherwise would fail at build time instead"
+            "every entry in an npm tarball must nest under the same root directory (usually `package/`, but not always — `@types/*` packages use their own name); an archive whose entries disagree about that root cannot be extracted"
         )
     )]
     MalformedTarball { key: String, reason: String },
 
-    #[error("{key}: tarball contains no package/package.json")]
+    #[error("{key}: tarball's root directory contains no package.json")]
     #[diagnostic(code(pudu::vendor::missing_package_json))]
     MissingPackageJson { key: String },
 

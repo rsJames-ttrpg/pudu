@@ -154,6 +154,14 @@ fn read_archive(key: &str, bytes: &[u8]) -> Result<Archive, VendorError> {
     let mut ar = tar::Archive::new(dec);
     let mut entries = Vec::new();
     let mut manifest_text: Option<String> = None;
+    // Most npm tarballs nest under `package/`, but not all: packages
+    // published by DefinitelyTyped's types-publisher (every `@types/*`
+    // package) nest under the package's own display name instead — e.g.
+    // `@types/estree` unpacks to `estree/`, `@types/node` to `node v22.20/`.
+    // What matters is that every entry in one archive shares a single root;
+    // that root is whatever a future build-rule pass will pass to
+    // `strip_prefix`, not necessarily the literal string `package`.
+    let mut root: Option<String> = None;
 
     for entry in ar
         .entries()
@@ -168,14 +176,18 @@ fn read_archive(key: &str, bytes: &[u8]) -> Result<Archive, VendorError> {
             .replace('\\', "/");
 
         let mut parts = path.splitn(2, '/');
-        let root = parts.next().unwrap_or_default();
-        if root != "package" {
-            return Err(malformed(format!(
-                "archive is rooted at `{root}`, not `package`"
-            )));
+        let this_root = parts.next().unwrap_or_default();
+        match &root {
+            None => root = Some(this_root.to_string()),
+            Some(r) if r != this_root => {
+                return Err(malformed(format!(
+                    "archive has inconsistent root directories: `{r}` and `{this_root}`"
+                )));
+            }
+            Some(_) => {}
         }
         let Some(rel) = parts.next().filter(|r| !r.is_empty()) else {
-            continue; // the `package/` directory entry itself
+            continue; // the root directory entry itself
         };
 
         if !is_file {
@@ -422,6 +434,14 @@ mod tests {
             .0
     }
 
+    fn inspect_rooted(root: &str, files: &[(&str, &str)]) -> Verified {
+        let bytes = rooted_tarball(root, files);
+        let i = integrity_of(&bytes);
+        verify_and_inspect("p@1.0.0", "p", URL, &bytes, &i)
+            .unwrap()
+            .0
+    }
+
     #[test]
     fn a_matching_integrity_verifies() {
         let v = inspect(&[("package.json", r#"{"name":"p"}"#)]);
@@ -463,19 +483,44 @@ mod tests {
     }
 
     #[test]
-    fn a_non_package_root_is_rejected() {
-        // A codeload archive nests under `<repo>-<sha>/`. pudu emits
-        // `strip_prefix = "package"`, so this must fail here rather than at
-        // build time.
-        let bytes = rooted_tarball("is-plain-obj-3b33a59", &[("package.json", "{}")]);
+    fn a_consistent_non_package_root_is_accepted() {
+        // `@types/*` packages, published by DefinitelyTyped's
+        // types-publisher, nest under the package's display name rather than
+        // `package/` — e.g. `@types/estree` unpacks to `estree/`. That is a
+        // real, current shape on the registry (see the vendor oracle), not a
+        // malformed archive, so it must verify like any other.
+        let v = inspect_rooted("estree", &[("package.json", r#"{"name":"@types/estree"}"#)]);
+        assert_eq!(v.inspection.bin, BTreeMap::new());
+    }
+
+    #[test]
+    fn inconsistent_root_directories_are_rejected() {
+        // A genuinely malformed archive: two entries disagree about what
+        // directory they are nested under.
+        let mut ar = tar::Builder::new(Vec::new());
+        for (root, path, body) in [
+            ("package", "package.json", "{}"),
+            ("other", "index.js", "module.exports = 1;\n"),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            ar.append_data(&mut h, format!("{root}/{path}"), body.as_bytes())
+                .unwrap();
+        }
+        let tar_bytes = ar.into_inner().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&tar_bytes).unwrap();
+        let bytes = gz.finish().unwrap();
         let i = integrity_of(&bytes);
         let err = verify_and_inspect("p@1.0.0", "p", URL, &bytes, &i).unwrap_err();
         let VendorError::MalformedTarball { reason, .. } = &err else {
             panic!("wrong variant: {err:?}");
         };
         assert!(
-            reason.contains("is-plain-obj-3b33a59"),
-            "the reason must name the root it found: {reason}"
+            reason.contains("package") && reason.contains("other"),
+            "the reason must name both roots it found: {reason}"
         );
     }
 
