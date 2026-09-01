@@ -400,7 +400,7 @@ fn insert_bin(
 }
 
 /// The `directories.bin` path: the name comes from the filesystem, so the
-/// URL-safe and containment checks that guard a manifest-declared name do
+/// URL-safe and containment checks that guard a package.json-declared name do
 /// not apply — the entry is already inside the archive.
 fn insert_named(
     key: &str,
@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tarball_without_a_manifest_is_rejected() {
+    fn a_tarball_without_a_package_json_is_rejected() {
         let bytes = tarball(&[("index.js", "module.exports = 1;\n")]);
         let i = integrity_of(&bytes);
         let err = verify_and_inspect("p@1.0.0", "p", URL, &bytes, &i).unwrap_err();
