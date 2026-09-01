@@ -538,3 +538,37 @@ fn stdout_stays_empty_and_diagnostics_go_to_stderr() {
     );
     assert!(!out.stderr.is_empty(), "the summary must reach stderr");
 }
+
+#[test]
+fn an_old_pudu_lock_is_not_read_as_a_package_table() {
+    // S3.5 reset the format version to 1 on the grounds that the rename makes
+    // a collision impossible: no file an earlier pudu wrote can be opened as
+    // `packages.toml`. That argument is only sound if a stray `pudu.lock` is
+    // genuinely never read — so this test builds the exact tree that would
+    // expose the mistake, one holding complete and valid vendor data under
+    // the old name and nothing under the new one.
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    let contents = f.table();
+
+    let old = f.table_path().parent().unwrap().join("pudu.lock");
+    std::fs::rename(f.table_path(), &old).unwrap();
+
+    let out = f.cmd().args(["vendor", "--check"]).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "a tree holding only a pudu.lock must read as having no table at all"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("packages.toml has no entry for `left-pad@1.3.0`"),
+        "every package must be reported missing rather than carried over from pudu.lock:\n{stderr}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&old).unwrap(),
+        contents,
+        "pudu must not delete or rewrite a file it no longer writes"
+    );
+}
