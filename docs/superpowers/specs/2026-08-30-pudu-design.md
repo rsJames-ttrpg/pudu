@@ -375,6 +375,7 @@ npm_package(
     url     = "https://registry.npmjs.org/esbuild/-/esbuild-0.23.0.tgz",
     sha256  = "a5b1e5a2...",
     size    = 89341,
+    root    = "package",              # from pudu.lock; `@types/*` differ
     bin     = {"esbuild": "bin/esbuild"},
     visibility = ["PUBLIC"],
 )
@@ -385,18 +386,31 @@ npm_package(
 Four macros. `npm_package` emits an `http_archive` per package@version and an alias selecting the right per-platform variant:
 
 ```python
-def npm_package(name, url, sha256, size, bin = {}, visibility = None):
+def npm_package(name, url, sha256, size, root, bin = {}, visibility = None):
     http_archive(
         name = name,
         urls = [url],
         sha256 = sha256,
         size_bytes = size,
         type = "tar.gz",
-        strip_prefix = "package",     # npm tarballs universally nest under package/
+        strip_prefix = root,          # NOT always "package" — see below
         sub_targets = bin.values(),   # expose each bin script as //...:pkg[bin/foo]
         visibility = visibility or ["PUBLIC"],
     )
 ```
+
+`root` is **not** a constant. An earlier revision of this file hard-coded
+`strip_prefix = "package"` with the comment "npm tarballs universally nest
+under package/". That is false: DefinitelyTyped's types-publisher nests each
+`@types/*` package under its own display name, so `@types/estree` unpacks to
+`estree/` and `@types/node@22.20.x` to `node v22.20/`. The 400-package fixture
+has 18 such entries.
+
+The value comes from the `root` field S3 records for every package in
+`pudu.lock` (S3 design §6), computed once from the archive itself at vendor
+time. This pass must read it from the sidecar and must not re-derive it —
+`pudu.lock` is the whole offline input here, and deriving the root would mean
+re-downloading every tarball.
 
 A package target carries **no dependency attribute and no `select()`**. Dependency
 edges are not wired target-to-target at all: pudu consumes the instance graph at

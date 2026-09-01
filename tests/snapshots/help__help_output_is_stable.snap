@@ -9,7 +9,7 @@ Usage: pudu [OPTIONS] <COMMAND>
 Commands:
   init     Scaffold a pudu project
   config   Inspect pudu.toml
-  vendor   Fetch tarballs and write pudu.lock. [UNIMPLEMENTED — S3]
+  vendor   Fetch tarballs and write pudu.lock
   buckify  Emit BUCK, pudu.bzl, and config/BUCK. [UNIMPLEMENTED — S4]
   fixups   Manage the community fixup registry. [UNIMPLEMENTED — S7/S8]
   audit    Cross-check the lockfile against advisories. [UNIMPLEMENTED — Phase 2]
@@ -19,6 +19,6 @@ Commands:
 Options:
   -C <PATH>         Change to this directory before running
   -v, --verbose...  Increase log verbosity (-v, -vv)
-      --no-network  Forbid all network access. (No effect until S3.)
+      --no-network  Forbid all network access
   -h, --help        Print help
   -V, --version     Print version

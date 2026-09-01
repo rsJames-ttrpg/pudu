@@ -1,0 +1,541 @@
+//! `pudu vendor` end to end, against a mock registry.
+//!
+//! Each test builds a lockfile from the bytes it is about to serve, so the
+//! recorded integrity and the served tarball cannot drift apart.
+
+mod common;
+
+use std::io::Write as _;
+use std::path::Path;
+
+use httpmock::prelude::*;
+
+fn tarball(files: &[(&str, &str)]) -> Vec<u8> {
+    let mut ar = tar::Builder::new(Vec::new());
+    for (path, body) in files {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        ar.append_data(&mut h, format!("package/{path}"), body.as_bytes())
+            .unwrap();
+    }
+    let bytes = ar.into_inner().unwrap();
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&bytes).unwrap();
+    gz.finish().unwrap()
+}
+
+/// `\x20` in the lockfile literals below is a literal space: a `\` at the end
+/// of a Rust string line strips the newline *and* the next line's leading
+/// whitespace, and YAML indentation is load-bearing.
+fn integrity_of(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha512};
+    let mut h = Sha512::new();
+    h.update(bytes);
+    format!(
+        "sha512-{}",
+        base64::engine::general_purpose::STANDARD.encode(h.finalize())
+    )
+}
+
+struct Fixture {
+    dir: tempfile::TempDir,
+    cache: tempfile::TempDir,
+    server: MockServer,
+}
+
+impl Fixture {
+    /// A project whose lockfile depends on `left-pad@1.3.0` and `tool@2.0.0`,
+    /// both served by a mock registry.
+    fn new() -> Self {
+        Self::with_scopes(&[])
+    }
+
+    fn with_scopes(scopes: &[(&str, &str)]) -> Self {
+        let server = MockServer::start();
+        let plain = tarball(&[("package.json", r#"{"name":"left-pad"}"#)]);
+        let tool = tarball(&[
+            (
+                "package.json",
+                r#"{"name":"tool","bin":"cli.js","scripts":{"install":"node x"}}"#,
+            ),
+            ("cli.js", "#!/usr/bin/env node\n"),
+        ]);
+        // `os: [darwin]`, so S2 prunes it away on `linux-x64-gnu` and it
+        // survives only because a second platform is configured.
+        let mac = tarball(&[("package.json", r#"{"name":"mac-only"}"#)]);
+
+        server.mock(|when, then| {
+            when.method(GET).path("/left-pad/-/left-pad-1.3.0.tgz");
+            then.status(200).body(plain.clone());
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/tool/-/tool-2.0.0.tgz");
+            then.status(200).body(tool.clone());
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/mac-only/-/mac-only-3.0.0.tgz");
+            then.status(200).body(mac.clone());
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        // Two platforms, deliberately. `pudu.lock` is meant to be the union
+        // of what survives pruning on *any* configured platform, and with a
+        // single platform configured a first-platform-wins bug would be
+        // indistinguishable from the correct behaviour.
+        let mut config = format!(
+            "lockfile_path = \"pnpm-lock.yaml\"\n\
+             third_party_dir = \"third-party/js\"\n\n\
+             [platforms.linux-x64-gnu]\n\
+             os = \"linux\"\ncpu = \"x64\"\nlibc = \"glibc\"\n\n\
+             [platforms.darwin-arm64]\n\
+             os = \"darwin\"\ncpu = \"arm64\"\n\n\
+             [registry]\ndefault = \"{}\"\n",
+            server.base_url()
+        );
+        for (scope, url) in scopes {
+            config.push_str(&format!("\"{scope}\" = \"{url}\"\n"));
+        }
+        std::fs::write(dir.path().join("pudu.toml"), config).unwrap();
+
+        let lock = format!(
+            "lockfileVersion: '9.0'\n\n\
+             importers:\n\n  .:\n    dependencies:\n\
+             \x20     left-pad:\n        specifier: 1.3.0\n        version: 1.3.0\n\
+             \x20     tool:\n        specifier: 2.0.0\n        version: 2.0.0\n\
+             \x20   optionalDependencies:\n\
+             \x20     mac-only:\n        specifier: 3.0.0\n        version: 3.0.0\n\n\
+             packages:\n\n\
+             \x20 left-pad@1.3.0:\n    resolution: {{integrity: {}}}\n\n\
+             \x20 tool@2.0.0:\n    resolution: {{integrity: {}}}\n    hasBin: true\n\n\
+             \x20 mac-only@3.0.0:\n    resolution: {{integrity: {}}}\n    os: [darwin]\n\n\
+             snapshots:\n\n  left-pad@1.3.0: {{}}\n\n  tool@2.0.0: {{}}\n\n\
+             \x20 mac-only@3.0.0: {{}}\n",
+            integrity_of(&plain),
+            integrity_of(&tool),
+            integrity_of(&mac),
+        );
+        std::fs::write(dir.path().join("pnpm-lock.yaml"), lock).unwrap();
+
+        Fixture {
+            dir,
+            cache: tempfile::tempdir().unwrap(),
+            server,
+        }
+    }
+
+    fn cmd(&self) -> assert_cmd::Command {
+        let mut c = common::pudu(self.dir.path());
+        c.env("PUDU_CACHE_DIR", self.cache.path());
+        c
+    }
+
+    fn sidecar_path(&self) -> std::path::PathBuf {
+        self.dir.path().join("third-party/js/pudu.lock")
+    }
+
+    fn sidecar(&self) -> String {
+        std::fs::read_to_string(self.sidecar_path()).unwrap()
+    }
+}
+
+#[test]
+fn vendor_writes_a_sidecar_covering_every_package() {
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+
+    let text = f.sidecar();
+    assert!(
+        text.starts_with("# @generated by pudu. Do not edit by hand.\nversion = 2\n"),
+        "{text}"
+    );
+    assert!(text.contains(r#"["left-pad@1.3.0"]"#), "{text}");
+    assert!(text.contains(r#"["tool@2.0.0"]"#), "{text}");
+    assert!(text.contains(r#"bin = { tool = "cli.js" }"#), "{text}");
+    assert!(text.contains("has_install_script = true"), "{text}");
+    assert_eq!(
+        text.matches("sha256 = ").count(),
+        3,
+        "every entry records a sha256:\n{text}"
+    );
+    assert_eq!(
+        text.matches(r#"root = "package""#).count(),
+        3,
+        "every entry records the archive root a build rule will strip:\n{text}"
+    );
+}
+
+#[test]
+fn a_sidecar_from_an_older_pudu_is_regenerated_not_rejected() {
+    // `SIDECAR_VERSION` moved when `root` became required (8f90f6e), but a
+    // `pudu.lock` written by an older pudu still says `version = 1`. That
+    // must not be an error: `Loaded::WrongVersion` exists precisely so
+    // `vendor` rebuilds from scratch instead of failing `RawEntry`
+    // deserialization on the field the old file never wrote.
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    let original = f.sidecar();
+    assert!(
+        original.starts_with("# @generated by pudu. Do not edit by hand.\nversion = 2\n"),
+        "{original}"
+    );
+
+    let stale = original.replacen("version = 2\n", "version = 1\n", 1);
+    assert_ne!(stale, original, "the replacement must actually apply");
+    std::fs::write(f.sidecar_path(), &stale).unwrap();
+
+    f.cmd().arg("vendor").assert().success();
+
+    let regenerated = f.sidecar();
+    assert_eq!(
+        regenerated, original,
+        "a stale-version sidecar must be regenerated byte-identical to a fresh one, not left corrupted or rejected"
+    );
+}
+
+#[test]
+fn the_vendored_set_is_the_union_across_platforms_not_one_platform_s_view() {
+    // `mac-only@3.0.0` is `os: [darwin]`, so it survives pruning on
+    // `darwin-arm64` and nothing else. Vendoring it is the only offline proof
+    // that the download set is the union over every configured platform
+    // rather than the first platform's view — the whole basis for
+    // "`pudu.lock` is a function of `pudu.toml`".
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+
+    let text = f.sidecar();
+    assert!(
+        text.contains(r#"["mac-only@3.0.0"]"#),
+        "a darwin-only package must be vendored when darwin-arm64 is configured:\n{text}"
+    );
+    assert!(text.contains(r#"["left-pad@1.3.0"]"#), "{text}");
+}
+
+#[test]
+fn dropping_a_platform_makes_the_sidecar_stale() {
+    // The other direction of the same invariant: the union shrinks with the
+    // config, and `--check` is what catches it in CI.
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+
+    let config = std::fs::read_to_string(f.dir.path().join("pudu.toml")).unwrap();
+    let cut = config.find("[platforms.darwin-arm64]").unwrap();
+    let end = config.find("[registry]").unwrap();
+    std::fs::write(
+        f.dir.path().join("pudu.toml"),
+        format!("{}{}", &config[..cut], &config[end..]),
+    )
+    .unwrap();
+
+    let out = f.cmd().args(["vendor", "--check"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("mac-only@3.0.0"),
+        "the entry left behind by dropping darwin must be reported:\n{stderr}"
+    );
+}
+
+#[test]
+fn a_second_run_reproduces_the_sidecar_byte_for_byte() {
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    let first = f.sidecar();
+    f.cmd().arg("vendor").assert().success();
+    assert_eq!(first, f.sidecar());
+}
+
+#[test]
+fn a_re_download_from_a_cold_cache_reproduces_the_sidecar_byte_for_byte() {
+    // `a_second_run_reproduces_the_sidecar_byte_for_byte` carries every entry
+    // over and downloads nothing, so it never exercises the parallel path.
+    // Deleting the sidecar *and* the cache forces a genuine concurrent
+    // re-fetch of every package, which is where a non-deterministic
+    // collection or a completion-order dependency would show up.
+    let f = Fixture::new();
+    f.cmd().args(["vendor", "--jobs", "4"]).assert().success();
+    let first = f.sidecar();
+
+    std::fs::remove_file(f.sidecar_path()).unwrap();
+    std::fs::remove_dir_all(f.cache.path().join("tarballs")).unwrap();
+
+    let out = f.cmd().args(["vendor", "--jobs", "4"]).output().unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("3 downloaded") && stderr.contains("0 unchanged"),
+        "this must be a real re-download, not a carry-over:\n{stderr}"
+    );
+    assert_eq!(
+        first,
+        f.sidecar(),
+        "a parallel re-download must reproduce the sidecar byte for byte"
+    );
+}
+
+#[test]
+fn a_second_run_downloads_nothing() {
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    let out = f.cmd().arg("vendor").output().unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("0 downloaded") && stderr.contains("3 unchanged"),
+        "the second run must carry every entry over:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_exits_zero_when_current() {
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    f.cmd().args(["vendor", "--check"]).assert().success();
+}
+
+#[test]
+fn check_exits_five_and_names_the_package_when_stale() {
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+
+    // Drop one entry, keeping the file otherwise valid.
+    let text = f.sidecar();
+    let cut = text.find(r#"["tool@2.0.0"]"#).unwrap();
+    std::fs::write(f.sidecar_path(), &text[..cut]).unwrap();
+
+    let out = f.cmd().args(["vendor", "--check"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(5), "stale must exit 5, not 1 or 3");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("tool@2.0.0"), "{stderr}");
+}
+
+#[test]
+fn check_exits_five_when_the_sidecar_is_absent() {
+    let f = Fixture::new();
+    let out = f.cmd().args(["vendor", "--check"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(5));
+}
+
+#[test]
+fn check_needs_neither_the_network_nor_a_warm_cache() {
+    // The strongest available proof that `--check` opens no socket: run it
+    // against a *cold* cache with `--no-network`. Anything that fetched
+    // would have to fail.
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+
+    let cold = tempfile::tempdir().unwrap();
+    common::pudu(f.dir.path())
+        .env("PUDU_CACHE_DIR", cold.path())
+        .args(["vendor", "--check", "--no-network"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn no_network_succeeds_against_a_warm_cache() {
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    std::fs::remove_file(f.sidecar_path()).unwrap();
+    f.cmd().args(["vendor", "--no-network"]).assert().success();
+}
+
+#[test]
+fn no_network_against_a_cold_cache_names_the_missing_package() {
+    let f = Fixture::new();
+    let out = f.cmd().args(["vendor", "--no-network"]).output().unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("left-pad@1.3.0") || stderr.contains("tool@2.0.0"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--no-network"), "{stderr}");
+    // Exit criterion 4 asks for the package *and its URL*. `--no-network`
+    // alone is satisfied by the help text, so it proves nothing about the
+    // error itself.
+    assert!(
+        stderr.contains(&format!(
+            "{}/left-pad/-/left-pad-1.3.0.tgz",
+            f.server.base_url()
+        )) || stderr.contains(&format!("{}/tool/-/tool-2.0.0.tgz", f.server.base_url())),
+        "the error must name the URL that would have been fetched:\n{stderr}"
+    );
+}
+
+#[test]
+fn a_corrupt_sidecar_reports_the_underlying_parse_error() {
+    // "cannot read pudu.lock" on its own leaves the user guessing. The
+    // `reason` — a TOML parse error with its line number, or an io error for
+    // a permissions failure — is the whole diagnosis.
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.sidecar_path().parent().unwrap()).unwrap();
+    std::fs::write(
+        f.sidecar_path(),
+        "version = 2\n\n[\"left-pad@1.3.0\"]\nurl = \"u\"\nthis is not toml [[[\n",
+    )
+    .unwrap();
+
+    let out = f.cmd().args(["vendor", "--check"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("pudu.lock"), "{stderr}");
+    assert!(
+        stderr.contains("TOML parse error"),
+        "the underlying cause must reach the user:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("line 5"),
+        "including where in the file it is:\n{stderr}"
+    );
+}
+
+#[test]
+fn a_scope_override_is_used_and_recorded() {
+    let scoped = MockServer::start();
+    let bytes = tarball(&[("package.json", r#"{"name":"@myorg/thing"}"#)]);
+    scoped.mock(|when, then| {
+        when.method(GET).path("/@myorg/thing/-/thing-1.0.0.tgz");
+        then.status(200).body(bytes.clone());
+    });
+
+    let f = Fixture::with_scopes(&[("@myorg", &scoped.base_url())]);
+    let lock = format!(
+        "lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n\
+         \x20     '@myorg/thing':\n        specifier: 1.0.0\n        version: 1.0.0\n\n\
+         packages:\n\n  '@myorg/thing@1.0.0':\n    resolution: {{integrity: {}}}\n\n\
+         snapshots:\n\n  '@myorg/thing@1.0.0': {{}}\n",
+        integrity_of(&bytes)
+    );
+    std::fs::write(f.dir.path().join("pnpm-lock.yaml"), lock).unwrap();
+
+    f.cmd().arg("vendor").assert().success();
+    let text = f.sidecar();
+    assert!(
+        text.contains(&format!(
+            "{}/@myorg/thing/-/thing-1.0.0.tgz",
+            scoped.base_url()
+        )),
+        "the resolved URL must be recorded, not re-derived later:\n{text}"
+    );
+}
+
+#[test]
+fn a_tarball_whose_bytes_fail_the_integrity_aborts_naming_the_package() {
+    let server = MockServer::start();
+    let served = tarball(&[("package.json", r#"{"name":"left-pad"}"#)]);
+    let other = tarball(&[("package.json", r#"{"name":"left-pad","version":"9"}"#)]);
+    let served_copy = served.clone();
+    server.mock(|when, then| {
+        when.method(GET).path("/left-pad/-/left-pad-1.3.0.tgz");
+        then.status(200).body(served);
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pudu.toml"),
+        format!(
+            "lockfile_path = \"pnpm-lock.yaml\"\n\n\
+             [platforms.linux-x64-gnu]\nos = \"linux\"\ncpu = \"x64\"\nlibc = \"glibc\"\n\n\
+             [registry]\ndefault = \"{}\"\n",
+            server.base_url()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("pnpm-lock.yaml"),
+        format!(
+            "lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n\
+             \x20     left-pad:\n        specifier: 1.3.0\n        version: 1.3.0\n\n\
+             packages:\n\n  left-pad@1.3.0:\n    resolution: {{integrity: {}}}\n\n\
+             snapshots:\n\n  left-pad@1.3.0: {{}}\n",
+            // The integrity of bytes the server will not serve.
+            integrity_of(&other)
+        ),
+    )
+    .unwrap();
+
+    let cache = tempfile::tempdir().unwrap();
+    let out = common::pudu(dir.path())
+        .env("PUDU_CACHE_DIR", cache.path())
+        .arg("vendor")
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(3));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("left-pad@1.3.0"), "{stderr}");
+    assert!(stderr.contains("integrity"), "{stderr}");
+    // Exit criterion 2: the package, the URL, and *both* hashes. A user
+    // seeing this needs to know which host served the bytes and what hash
+    // actually arrived, to tell a mirror misconfiguration from a republished
+    // tarball from an attack.
+    assert!(
+        stderr.contains(&format!(
+            "{}/left-pad/-/left-pad-1.3.0.tgz",
+            server.base_url()
+        )),
+        "the error must name the URL it fetched:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&integrity_of(&other)),
+        "the error must name the expected hash:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&integrity_of(&served_copy)),
+        "the error must name the hash that actually arrived:\n{stderr}"
+    );
+    assert!(
+        !Path::new(&dir.path().join("third-party/js/pudu.lock")).exists(),
+        "a failed run must not write a sidecar"
+    );
+}
+
+#[test]
+fn a_git_resolution_is_refused_by_name() {
+    let f = Fixture::new();
+    std::fs::write(
+        f.dir.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n\
+         \x20     thing:\n        specifier: github:o/r\n        version: 1.0.0\n\n\
+         packages:\n\n  thing@1.0.0:\n    resolution: {tarball: https://codeload.example/x.tgz}\n\n\
+         snapshots:\n\n  thing@1.0.0: {}\n",
+    )
+    .unwrap();
+
+    let out = f.cmd().arg("vendor").output().unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("thing@1.0.0"), "{stderr}");
+}
+
+#[test]
+fn a_config_with_no_platforms_refuses_rather_than_writing_an_empty_sidecar() {
+    let f = Fixture::new();
+    std::fs::write(
+        f.dir.path().join("pudu.toml"),
+        format!(
+            "lockfile_path = \"pnpm-lock.yaml\"\n\n[registry]\ndefault = \"{}\"\n",
+            f.server.base_url()
+        ),
+    )
+    .unwrap();
+
+    let out = f.cmd().arg("vendor").output().unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(!f.sidecar_path().exists());
+}
+
+#[test]
+fn stdout_stays_empty_and_diagnostics_go_to_stderr() {
+    let f = Fixture::new();
+    let out = f.cmd().arg("vendor").output().unwrap();
+    assert!(out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "vendor produces a file, not a stream: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(!out.stderr.is_empty(), "the summary must reach stderr");
+}
