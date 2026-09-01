@@ -218,8 +218,21 @@ pnpm's rule, verbatim from the survey's §2 — three independent triggers:
 3. any entry matches `package/.hooks/…`
 
 Design §4 describes this as "`package.json` inspection". It is not — triggers 2
-and 3 are properties of the file list. `fsevents@2.3.3`, in our own fixture,
-is a live instance of trigger 2 alongside trigger 1.
+and 3 are properties of the file list.
+
+Trigger 1 has live instances in the fixture: `esbuild@0.25.12` and
+`esbuild@0.28.2`, both `"postinstall": "node install.js"`. **Triggers 2 and 3
+have none**, and are covered only by synthetic tarballs in `src/tarball.rs`'s
+unit tests.
+
+An earlier revision of this spec named `fsevents@2.3.3` as a live instance of
+trigger 2. It is not one: its sha512-verified tarball carries no
+`binding.gyp`, no `gypfile` field, and no install-family script at all — it
+ships a prebuilt `fsevents.node`. Only the registry packument claims
+otherwise, and that metadata is stale; real pnpm reads the extracted tarball,
+never the registry API, so it would compute `false` here as pudu does.
+`tests/vendor_oracle.rs` asserts exactly that, and TECH_DEBT TD-S3-03 carries
+the evidence.
 
 ### 5.2 `bin`
 
@@ -452,8 +465,12 @@ disagreement is the finding — the oracle is a cross-check, not the truth.
    naming the missing package and its URL.
 5. A scoped-registry override resolves to the right host and the resolved URL
    is recorded in the sidecar.
-6. `has_install_script` is true for `fsevents@2.3.3` on a darwin-configured
-   platform set, driven by `binding.gyp` as well as by `scripts.install`.
+6. `has_install_script` is true for `esbuild@0.25.12`, whose published tarball
+   genuinely carries `"postinstall": "node install.js"` and is rooted at
+   `package/`. (Not `fsevents@2.3.3`: its tarball carries no install-family
+   script and no `binding.gyp`, whatever its registry packument says — see
+   §5.1. The `binding.gyp` and `.hooks/` triggers have no live instance in
+   this fixture and are pinned by synthetic tarballs instead.)
 7. `@babel/parser`'s bin is recorded as `parser`, not `@babel/parser`.
 
 ---

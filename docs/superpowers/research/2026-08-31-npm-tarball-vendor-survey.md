@@ -74,14 +74,34 @@ Design §4 describes this as "`package.json` inspection". That is **incomplete**
 `binding.gyp` and no scripts at all still requires a build, and pudu would have
 reported `has_install_script = false` for it.
 
-The fixture contains a live instance rather than a hypothetical one:
-`fsevents@2.3.3` carries both `"install": "node-gyp rebuild"` **and**
-`gypfile: true`. The other two install-script packages in the fixture are
-`esbuild@0.25.12` and `esbuild@0.28.2`, both `postinstall`. Three of 400.
+**Trigger 1 has live instances in the fixture; triggers 2 and 3 have none.**
+`esbuild@0.25.12` and `esbuild@0.28.2` both carry `"postinstall": "node
+install.js"` in their published tarballs. Two of 400.
+
+An earlier revision of this section claimed a third — `fsevents@2.3.3`, said to
+carry `"install": "node-gyp rebuild"` and `gypfile: true`, and so to be a live
+instance of trigger 2 as well as trigger 1. **That is wrong, and it was checked
+by hand.** Its sha512-verified tarball contains no `binding.gyp`, no `gypfile`
+field, and no `install`, `preinstall`, or `postinstall` script; its scripts are
+`clean`, `build`, `test`, and `prepublishOnly`, and it ships a prebuilt
+`fsevents.node` instead. Only the registry's packument says otherwise, and that
+metadata is stale for this one field on this one version. Real pnpm's
+`pkgRequiresBuild` reads the manifest and the file index back from the
+*extracted tarball*, never the registry API, so pnpm would compute `false` here
+too. See TECH_DEBT TD-S3-03 for the full trail, and `tests/vendor_oracle.rs`,
+which already encodes the truth by asserting `has_install_script == false`.
+
+So triggers 2 (`binding.gyp`) and 3 (`.hooks/`) have **no live instance
+anywhere in this fixture**. They are real pnpm rules and pudu implements them,
+but they are covered only by synthetic tarballs built in `src/tarball.rs`'s
+unit tests. A future implementer must not go looking for `fsevents` as the
+worked example of `binding.gyp`; it is not one.
 
 `fsevents` is `os: [darwin]`, so on a linux-only platform config it is pruned
 before the vendor pass ever sees it — the S6 script gate and S2's pruning
 interact, and a test asserting the gate fires must configure a darwin platform.
+`esbuild` is platform-independent, so it is the package to reach for when a
+test needs an install script that survives any platform config.
 
 ---
 

@@ -666,7 +666,12 @@ mod tests {
 
     #[test]
     fn binding_gyp_triggers_with_no_scripts_at_all() {
-        // fsevents@2.3.3 is the live instance of this in our own fixture.
+        // Synthetic on purpose: the `binding.gyp` trigger has **no** live
+        // instance in the 400-package fixture. `fsevents@2.3.3` is not one,
+        // despite what its registry packument says — its sha512-verified
+        // tarball contains no `binding.gyp` and no install-family script, and
+        // `tests/vendor_oracle.rs` asserts `has_install_script == false` for
+        // it. See TECH_DEBT TD-S3-03.
         let v = inspect(&[("package.json", r#"{"name":"p"}"#), ("binding.gyp", "{}")]);
         assert!(v.inspection.has_install_script);
     }
