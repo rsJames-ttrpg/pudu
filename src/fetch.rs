@@ -72,6 +72,25 @@ impl Fetcher {
         }
     }
 
+    /// Run every request across `self.jobs` worker threads and collect the
+    /// results.
+    ///
+    /// The per-package pipeline (`one`) is expected to be panic-free: it is
+    /// ordinary I/O and hashing, with every fallible step returning a
+    /// `Result` rather than panicking. On that assumption, a panic inside a
+    /// worker is a bug, not a per-package failure — so it is deliberately
+    /// *not* caught and converted into an `Err` for the offending package.
+    /// `std::thread::scope` re-raises a worker panic after joining, which
+    /// aborts this whole call: every `Outcome` for packages that were still
+    /// in flight or unclaimed is lost, not just the one that panicked.
+    /// Catching the panic and downgrading it to a single `Err` was
+    /// considered and rejected — there is no way to provoke a real panic
+    /// from this pipeline to exercise that recovery path, and untested
+    /// error handling is its own hazard. The blast radius is bounded
+    /// regardless: verified bytes are written to the content-addressed
+    /// cache before `one` can return, so a rerun after an abort re-downloads
+    /// nothing for packages that had already succeeded — only the aborted
+    /// batch's bookkeeping is lost, not the work.
     pub fn run(&self, requests: Vec<Request>) -> (BTreeMap<String, Outcome>, Stats) {
         let queue = Mutex::new(requests);
         let out: Mutex<BTreeMap<String, Outcome>> = Mutex::new(BTreeMap::new());
@@ -379,6 +398,24 @@ mod tests {
             Cache::with_root(dir.path().to_path_buf()).get("p@1.0.0", &wrong),
             None,
             "bytes that failed verification must not be readable as a cache hit"
+        );
+
+        // `Cache::get` re-hashes on every read, so the assertion above holds
+        // even if verification is skipped entirely — it is not, by itself,
+        // proof that `one()` verifies before caching. The invariant that
+        // actually matters is that nothing was ever written to disk for
+        // this download. `one()` calls `self.cache.put(&req.key,
+        // &req.integrity, &bytes)`, and `req.integrity` here is `wrong` (the
+        // caller's claimed integrity, not the hash of the bytes actually
+        // served), so `wrong` is the integrity `put` would have addressed
+        // its write by. Assert directly against the path `Cache::path_for`
+        // derives from `wrong`.
+        let path = Cache::with_root(dir.path().to_path_buf())
+            .path_for("p@1.0.0", &wrong)
+            .unwrap();
+        assert!(
+            !path.exists(),
+            "bytes that failed verification must never be written to the cache at all"
         );
     }
 
