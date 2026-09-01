@@ -50,11 +50,11 @@ pub struct Verified {
 ///
 /// Every field is a raw `Value` rather than a typed shape. A published
 /// package can carry anything at all in these keys — `"directories": []`,
-/// a non-string script — and one malformed manifest six levels down the
+/// a non-string script — and one malformed package.json six levels down the
 /// dependency tree must not fail the whole vendor pass. `Value` defaults to
 /// `Null`, so an absent key and a nonsense key both navigate to `None`.
 #[derive(Debug, Default, Deserialize)]
-pub(crate) struct Manifest {
+pub(crate) struct PackageJson {
     #[serde(default)]
     pub(crate) bin: serde_json::Value,
     #[serde(default)]
@@ -65,7 +65,7 @@ pub(crate) struct Manifest {
 
 /// The archive, reduced to what inspection needs.
 pub(crate) struct Archive {
-    pub(crate) manifest: Manifest,
+    pub(crate) package_json: PackageJson,
     /// The single directory every entry nests under, no trailing slash.
     pub(crate) root: String,
     /// File entries only, relative to the package root, `/`-separated.
@@ -227,7 +227,7 @@ fn read_archive(key: &str, bytes: &[u8]) -> Result<Archive, VendorError> {
     let text = manifest_text.ok_or_else(|| VendorError::MissingPackageJson {
         key: key.to_string(),
     })?;
-    let manifest: Manifest = serde_json::from_str(&text)
+    let package_json: PackageJson = serde_json::from_str(&text)
         .map_err(|e| malformed(format!("package.json is not valid JSON: {e}")))?;
 
     entries.sort();
@@ -235,7 +235,7 @@ fn read_archive(key: &str, bytes: &[u8]) -> Result<Archive, VendorError> {
     // `package.json` was found, so at least one entry set the root.
     let root = root.unwrap_or_default();
     Ok(Archive {
-        manifest,
+        package_json,
         root,
         entries,
     })
@@ -246,13 +246,13 @@ fn read_archive(key: &str, bytes: &[u8]) -> Result<Archive, VendorError> {
 fn has_install_script(archive: &Archive) -> bool {
     let script = |k: &str| {
         archive
-            .manifest
+            .package_json
             .scripts
             .get(k)
             .and_then(serde_json::Value::as_str)
             .is_some_and(|s| !s.is_empty())
     };
-    // `Value::get` on `Null` is `None`, so a manifest with no `scripts` key
+    // `Value::get` on `Null` is `None`, so a package.json with no `scripts` key
     // at all takes the same path as one whose `scripts` is not an object.
     script("preinstall")
         || script("install")
@@ -278,7 +278,7 @@ fn resolve_bins(
 ) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
 
-    match &archive.manifest.bin {
+    match &archive.package_json.bin {
         serde_json::Value::String(path) if !path.is_empty() => {
             insert_bin(key, command_name(name), path, &mut out, warnings);
         }
@@ -305,7 +305,7 @@ fn resolve_bins(
         // which is what `if (manifest.bin)` actually tests.
         _ => {
             if let Some(dir) = archive
-                .manifest
+                .package_json
                 .directories
                 .get("bin")
                 .and_then(serde_json::Value::as_str)
