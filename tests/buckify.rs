@@ -289,6 +289,54 @@ fn the_generated_files_carry_the_generated_banner() {
     }
 }
 
+/// Recursively copies `src` into `dst`, skipping `prelude`, `buck-out` and
+/// `none`: they are not needed by the test and `prelude` would be enormous
+/// if present locally (a developer's real checkout, not the fixture's own
+/// gitignored one).
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name == "prelude" || name == "buck-out" || name == "none" {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if entry.file_type().unwrap().is_dir() {
+            std::fs::create_dir_all(&to).unwrap();
+            copy_dir(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
+#[test]
+fn the_pure_js_fixture_emits_stable_output() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/buck/01-pure-js");
+    // Copy to a temp dir: the test writes generated files, and a test that
+    // mutates its own fixture is a test that passes only the first time.
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&dir, tmp.path());
+
+    common::pudu(tmp.path()).arg("buckify").assert().success();
+
+    let tp = tmp.path().join("third-party/js");
+    insta::assert_snapshot!(
+        "pure_js_BUCK",
+        std::fs::read_to_string(tp.join("BUCK")).unwrap()
+    );
+    insta::assert_snapshot!(
+        "pure_js_pudu_bzl",
+        std::fs::read_to_string(tp.join("pudu.bzl")).unwrap()
+    );
+    insta::assert_snapshot!(
+        "pure_js_config_BUCK",
+        std::fs::read_to_string(tp.join("config/BUCK")).unwrap()
+    );
+}
+
 #[test]
 fn a_lockfile_with_no_packages_emits_an_empty_buck() {
     // staleness() reports nothing when there is nothing expected, so this

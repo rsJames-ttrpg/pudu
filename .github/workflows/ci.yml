@@ -78,3 +78,40 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (ignored live-registry oracle)
         run: cargo test --test vendor_oracle -- --ignored --nocapture
+      - name: cargo test (ignored buckify scale run)
+        run: cargo test --test buckify_scale -- --ignored --nocapture
+
+  buck2-build:
+    name: buck2 build (generated output)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install buck2 (pinned release)
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL -o buck2.zst https://github.com/facebook/buck2/releases/download/2026-08-22/buck2-x86_64-unknown-linux-gnu.zst
+          zstd -d buck2.zst -o "$HOME/.local/bin/buck2"
+          chmod +x "$HOME/.local/bin/buck2"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: vendor the prelude at the matching pin
+        # buck2 and its prelude are pinned by the SAME release tag, so they
+        # cannot drift apart. Spec §1.1 was a design error rather than a
+        # prelude regression, but it is exactly the class of breakage an
+        # unpinned prelude delivers as a mystery failure.
+        run: |
+          git clone --depth 1 --branch 2026-08-22 --filter=blob:none --sparse \
+            https://github.com/facebook/buck2.git /tmp/buck2src
+          git -C /tmp/buck2src sparse-checkout set prelude
+          cp -r /tmp/buck2src/prelude tests/fixtures/buck/01-pure-js/prelude
+      - name: pudu buckify
+        run: cargo run -- -C tests/fixtures/buck/01-pure-js buckify
+      - name: buck2 build
+        run: buck2 build //third-party/js/...
+        working-directory: tests/fixtures/buck/01-pure-js
+      - name: the root and bin sub-targets resolve
+        run: |
+          buck2 build '//third-party/js:@types+node@22.20.0[root]'
+          buck2 build '//third-party/js:semver@7.6.3[bin/semver]'
+        working-directory: tests/fixtures/buck/01-pure-js

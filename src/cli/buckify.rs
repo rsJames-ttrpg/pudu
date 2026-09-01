@@ -60,7 +60,13 @@ pub fn run(check: bool) -> Result<()> {
         Loaded::Absent | Loaded::WrongVersion(_) => &empty,
     };
 
-    let generated = buck::generate(entries, &config.platforms, &third_party_dir)?;
+    // The load() label is a Buck cell path (relative to the cell root), not
+    // a filesystem path — `third_party_dir` above is absolute (joined with
+    // cwd) for reading and writing files, but passing that absolute path
+    // here would emit `load("///tmp/.../third-party/js:pudu.bzl", ...)`,
+    // which is not a valid Buck label. `config.third_party_dir` is the
+    // relative path straight from pudu.toml, which is what a label needs.
+    let generated = buck::generate(entries, &config.platforms, &config.third_party_dir)?;
 
     if check {
         generated.check(&third_party_dir)?;
