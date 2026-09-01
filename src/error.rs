@@ -46,8 +46,9 @@ pub enum ExitCode {
     InputInvalid = 3,
     /// The verb is registered but not implemented yet.
     Unimplemented = 4,
-    /// `pudu vendor --check` found `packages.toml` out of date. Distinct from
-    /// `InputInvalid` so CI can tell "regenerate the package table" from
+    /// `pudu vendor --check` found `packages.toml` out of date, or
+    /// `pudu buckify --check` found a generated file out of date. Distinct
+    /// from `InputInvalid` so CI can tell "regenerate by running pudu" from
     /// "your config is wrong" without parsing the message.
     Stale = 5,
 }
@@ -583,6 +584,73 @@ impl VendorError {
     }
 }
 
+// --- Buckify (S4) -----------------------------------------------------------
+
+/// Failures of `pudu buckify`.
+#[derive(Debug, Error, Diagnostic)]
+pub enum BuckError {
+    #[error("{} is out of date", path.display())]
+    #[diagnostic(
+        severity(Error),
+        code(pudu::buckify::stale),
+        help("run `pudu buckify` to regenerate it, and commit the result")
+    )]
+    Stale { path: PathBuf },
+
+    #[error("{package}: bin name `{name}` cannot be addressed as a Buck2 sub-target")]
+    #[diagnostic(
+        code(pudu::buckify::unrepresentable_bin_name),
+        help(
+            "a bin entry becomes the sub-target `bin/<name>`, and Buck2 accepts only letters, digits, `.`, `+`, `-` and `_` there. npm allows more. Report this package — pudu can grow a fixup that renames the bin."
+        )
+    )]
+    UnrepresentableBinName { package: String, name: String },
+
+    #[error("third_party_dir `{}` cannot become a Buck label: {reason}", path.display())]
+    #[diagnostic(
+        code(pudu::buckify::unusable_third_party_dir),
+        help(
+            "third_party_dir becomes the Buck label `//<third_party_dir>:pudu.bzl`. A Buck label must be a normalized path relative to the repository root — no leading `/`, no `.` or `..` components, and no empty components from a leading, trailing or doubled `/`. Set `third_party_dir` in pudu.toml accordingly."
+        )
+    )]
+    UnusableThirdPartyDir { path: PathBuf, reason: String },
+
+    #[error("cannot write {path}")]
+    #[diagnostic(code(pudu::buckify::write_failed))]
+    WriteFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("cannot read {path}")]
+    #[diagnostic(code(pudu::buckify::read_failed))]
+    ReadFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl BuckError {
+    pub fn exit_code(&self) -> ExitCode {
+        match self {
+            // "Regenerate by running pudu", the same contract `vendor --check`
+            // already means by this code.
+            BuckError::Stale { .. } => ExitCode::Stale,
+            // The offending value came from `packages.toml`, not from the
+            // command line, so this is input-invalid rather than usage.
+            BuckError::UnrepresentableBinName { .. } => ExitCode::InputInvalid,
+            // The offending value came from pudu.toml, not from the command
+            // line, so this is input-invalid too.
+            BuckError::UnusableThirdPartyDir { .. } => ExitCode::InputInvalid,
+            // An I/O failure mid-write or mid-read is unexpected, like any
+            // other I/O failure elsewhere in pudu.
+            BuckError::WriteFailed { .. } | BuckError::ReadFailed { .. } => ExitCode::Internal,
+        }
+    }
+}
+
 /// Non-fatal findings from inspecting a tarball.
 ///
 /// Every one of these is a property of somebody's published package rather
@@ -881,6 +949,7 @@ macro_rules! typed_errors {
 }
 
 typed_errors! {
+    BuckError => BuckError::exit_code,
     CliError => CliError::exit_code,
     ConfigError => |_| ExitCode::InputInvalid,
     DeriveError => |_| ExitCode::InputInvalid,
@@ -1096,6 +1165,15 @@ mod tests {
     /// sample here fails the build's tests.
     fn samples() -> Vec<(&'static str, anyhow::Error, ExitCode)> {
         vec![
+            (
+                "BuckError",
+                BuckError::UnrepresentableBinName {
+                    package: "pkg@1.0.0".into(),
+                    name: "bang!".into(),
+                }
+                .into(),
+                ExitCode::InputInvalid,
+            ),
             (
                 "CliError",
                 CliError::Unimplemented {

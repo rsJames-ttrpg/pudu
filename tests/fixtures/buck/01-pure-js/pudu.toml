@@ -1,0 +1,15 @@
+lockfile_path = "pnpm-lock.yaml"
+third_party_dir = "third-party/js"
+
+[platforms.linux-x64-gnu]
+os = "linux"
+cpu = "x64"
+libc = "glibc"
+
+[platforms.linux-x64-musl]
+os = "linux"
+cpu = "x64"
+libc = "musl"
+
+[registry]
+default = "https://registry.npmjs.org"

@@ -218,7 +218,10 @@ malformed.
 What pudu enforces instead is consistency: an archive whose entries disagree
 about their root cannot be extracted to one directory, and that is
 `MalformedTarball`. The root it settles on is recorded as the package table's
-`root` field (§6) and is what design §8 must pass to `strip_prefix`.
+`root` field (§6). It is **not** passed to `strip_prefix`: S4 found that the
+prelude interpolates `strip_prefix` unquoted into a shell command, so a
+space-rooted `@types/*` archive breaks the build. S4 emits `root` as the
+`[root]` sub-target instead — see the S4 design, §1.1/§1.2.
 
 Tar metadata members — `pax_global_header`, emitted by GNU tar's default pax
 format and by `git archive` — are not part of the directory tree and are
@@ -320,11 +323,11 @@ dependencies, so one entry serves every peer instance.
 omitted when empty and `has_install_script` when false — the common
 case is a package with neither, and 373 of 400 fixture packages have no bin.
 
-`root` is the archive's single root directory (§5), with no trailing slash:
-what design §8's `http_archive` passes to `strip_prefix`. It is **required**,
-never defaulted — every valid archive has exactly one, and it is `package` for
-most but not all of them (18 `@types/*` entries in the fixture nest under
-their own display name). It is recorded rather than recomputed because the
+`root` is the archive's single root directory (§5), with no trailing slash.
+It is **required**, never defaulted — every valid archive has exactly one,
+and it is `package` for most but not all of them (18 `@types/*` entries in
+the fixture nest under their own display name). It is recorded rather than
+recomputed because the
 package table is the only offline input the build-rule pass has; deriving the root
 there would mean re-downloading and re-inspecting every tarball, which is the
 one thing committing the package table exists to avoid.

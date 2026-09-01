@@ -1,5 +1,6 @@
 //! CLI surface and dispatch.
 
+pub mod buckify;
 pub mod config_check;
 pub mod context;
 pub mod debug;
@@ -59,7 +60,7 @@ pub enum Commands {
         #[arg(long, value_name = "N", default_value_t = 8)]
         jobs: usize,
     },
-    /// Emit BUCK, pudu.bzl, and config/BUCK. [UNIMPLEMENTED — S4]
+    /// Emit BUCK, pudu.bzl, and config/BUCK.
     Buckify {
         /// Exit non-zero if generated files are stale.
         #[arg(long)]
@@ -120,7 +121,7 @@ impl Cli {
                 ConfigCommands::Check { format } => config_check::run(format),
             },
             Commands::Vendor { check, jobs } => vendor::run(check, jobs, no_network, verbose),
-            Commands::Buckify { .. } => Err(stub::unimplemented("buckify", "S4")),
+            Commands::Buckify { check } => buckify::run(check),
             Commands::Fixups => Err(stub::unimplemented("fixups", "S7/S8")),
             Commands::Audit => Err(stub::unimplemented("audit", "Phase 2")),
             Commands::Unused => Err(stub::unimplemented("unused", "Phase 2")),

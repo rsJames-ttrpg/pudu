@@ -104,34 +104,36 @@ Stage spec: [S1](2026-08-31-pudu-s1-lockfile-design.md).
 
 ---
 
-### S4 — First BUCK emitter (pure-JS, single platform)
+### S4 — First BUCK emitter (package layer, single platform)
 
-**Scope:** Deterministic BUCK formatter. `npm_package` emission, `config/BUCK` generation, `pudu.bzl`. The `node_modules_tree` store-layout generator. Snapshot tests via insta. Determinism test.
+**Scope:** Deterministic BUCK formatter for the package layer only. `npm_package` emission, `config/BUCK` generation, `pudu.bzl`. Snapshot tests via insta. Determinism test. The `node_modules_tree` store-layout generator moved to S5 (see below): it needs real directories and intra-tree symlinks from a single Buck action, which `filegroup` cannot provide, so it is a rule pudu must write rather than one composed from prelude primitives.
 
-This stage resolves three design §12 unknowns: `filegroup` scale on a realistic store, `http_archive` `sub_targets` for `.bin` extraction, and Node's symlink realpath behaviour under buck-out.
+This stage resolves two of design §12's three unknowns: `http_archive` `sub_targets` for `.bin`/`root` extraction (confirmed) and Node's symlink realpath behaviour under a `filegroup`-based store (refuted — see the S4 design §1.4). `filegroup` scale moves to S5 with the rule it concerns.
 
 **Exit criteria:**
 - `pudu buckify` on `01-pure-js` produces byte-identical artifacts matching golden files.
 - Running buckify twice produces no diff (`10-determinism`).
 - Sort order documented and tested: lexicographic by snapshot key, then platform.
-- `buck2 build //third-party/js/...` succeeds on the fixture.
-- A store-layout scale measurement is recorded; if `filegroup` degrades, the per-package fallback is specced as a follow-up.
+- `buck2 build //third-party/js/...` succeeds on the fixture, including `[root]` and `[bin/*]` sub-targets.
 
 **Demo:** A fixture with a handful of pure-JS deps buckifies; the BUCK is human-readable and matches design §8.
 
-**Touches:** `src/buck/`, `tests/fixtures/01-pure-js/`, `tests/fixtures/10-determinism/`.
+**Touches:** `src/buck/`, `src/cli/buckify.rs`, `tests/fixtures/buck/01-pure-js/`.
 
 ---
 
-### S5 — Multi-platform, node_binary, toolchain ("esbuild day one")
+### S5 — Multi-platform, node_binary, toolchain, store layout ("esbuild day one")
 
-**Scope:** Per-platform emission and the alias-with-select pattern. `system_node_toolchain`. `node_binary` and `node_test` macros. End-to-end `buck2 run`.
+**Scope:** The `node_modules_tree` store-layout generator (moved here from S4 — see above). Per-platform emission and the alias-with-select pattern. `system_node_toolchain`. `node_binary` and `node_test` macros. End-to-end `buck2 run`.
+
+This stage resolves design §12's remaining unknown: `filegroup` scale on a realistic store graph.
 
 **Exit criteria:**
 - `02-platform-optional` buckifies; CI runs `buck2 run //packages/app:main` on Linux x86_64 and macOS arm64, and the output proves the correct `@esbuild/*` was selected.
 - `03-peer-instances` produces distinct targets for distinct peer resolutions, both buildable.
 - `04-musl` emits the abi constraint on both platforms and buckifies.
 - `05-workspace` emits one `node_modules_tree` per importer over a shared store.
+- A store-layout scale measurement is recorded; if `filegroup` degrades, the per-package fallback is specced as a follow-up.
 
 **Demo:** `buck2 run //packages/server:server` starts an express server whose TypeScript was compiled by tsc and whose esbuild resolved to the host's platform package.
 
@@ -267,7 +269,8 @@ S1 and S2 can be developed in parallel after S0; both feed S3.
 | S2 | [2026-08-31-pudu-s2-platforms-design.md](./2026-08-31-pudu-s2-platforms-design.md) | [2026-08-31-pudu-s2-platforms.md](../plans/2026-08-31-pudu-s2-platforms.md) | ✅ shipped (17 commits, 247 tests) |
 | S3 | [2026-08-31-pudu-s3-vendor-design.md](./2026-08-31-pudu-s3-vendor-design.md) | [2026-08-31-pudu-s3-vendor.md](../plans/2026-08-31-pudu-s3-vendor.md) | ✅ shipped |
 | S3.5 | [2026-09-01-pudu-s3.5-package-table-design.md](./2026-09-01-pudu-s3.5-package-table-design.md) | [2026-09-01-pudu-s3.5-package-table.md](../plans/2026-09-01-pudu-s3.5-package-table.md) | ✅ shipped |
-| S4–S9 | (not yet written) | (not yet written) | ⬜ planned |
+| S4 | [2026-09-01-pudu-s4-buck-emitter-design.md](./2026-09-01-pudu-s4-buck-emitter-design.md) | [2026-09-01-pudu-s4-buck-emitter.md](../plans/2026-09-01-pudu-s4-buck-emitter.md) | ✅ shipped |
+| S5–S9 | (not yet written) | (not yet written) | ⬜ planned |
 
 ---
 

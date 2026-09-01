@@ -1,0 +1,47 @@
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      '@types/node':
+        specifier: 22.20.0
+        version: 22.20.0
+      left-pad:
+        specifier: 1.3.0
+        version: 1.3.0
+      semver:
+        specifier: 7.6.3
+        version: 7.6.3
+
+  packages/legacy:
+    dependencies:
+      semver:
+        specifier: 6.3.1
+        version: 6.3.1
+
+packages:
+
+  '@types/node@22.20.0':
+    resolution: {integrity: sha512-QWlFW2wf3nTjC13/DqRnBpR4ZO36VJH/JVBkA/vcnmbTBNQIlnObqyqZE1tUR7+Ni23Lda8R1BxMfbXRpCUx5g==}
+
+  left-pad@1.3.0:
+    resolution: {integrity: sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQGinBN9yTQT3bFlCBy/aVx2HrNcqQGsdot8ghrjyrvMCoEA==}
+
+  semver@6.3.1:
+    resolution: {integrity: sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA==}
+    hasBin: true
+
+  semver@7.6.3:
+    resolution: {integrity: sha512-oVekP1cKtI+CTDvHWYFUcMtsK/00wmAEfyqKfNdARm8u1wNVhSgaX7A8d4UuIlUI5e84iEwOhs7ZPYRmzU9U6A==}
+    hasBin: true
+
+snapshots:
+
+  '@types/node@22.20.0': {}
+
+  left-pad@1.3.0: {}
+
+  semver@6.3.1: {}
+
+  semver@7.6.3: {}

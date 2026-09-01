@@ -23,14 +23,17 @@ use crate::error::{VendorError, VendorWarning};
 /// What inspecting the archive yields.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Inspection {
-    /// The archive's single root directory, with no trailing slash — what a
-    /// build rule passes to `http_archive(strip_prefix = …)`.
+    /// The archive's single root directory, with no trailing slash.
     ///
     /// Usually `package`, but not always: every `@types/*` package nests
     /// under its own display name instead (`estree`, `node v22.20`). It is
     /// recorded rather than recomputed because the package table is the only
     /// offline input a later build-rule pass has, and re-deriving it would
     /// mean re-downloading every tarball.
+    ///
+    /// **Not** for `http_archive(strip_prefix = …)`: the prelude interpolates
+    /// that into a shell command unquoted, so a root containing a space
+    /// breaks the build. S4 emits it as the `[root]` sub-target instead.
     pub root: String,
     pub bin: BTreeMap<String, String>,
     pub has_install_script: bool,
@@ -170,9 +173,10 @@ fn read_archive(key: &str, bytes: &[u8]) -> Result<Archive, VendorError> {
     // published by DefinitelyTyped's types-publisher (every `@types/*`
     // package) nest under the package's own display name instead — e.g.
     // `@types/estree` unpacks to `estree/`, `@types/node` to `node v22.20/`.
-    // What matters is that every entry in one archive shares a single root;
-    // that root is whatever a future build-rule pass will pass to
-    // `strip_prefix`, not necessarily the literal string `package`.
+    // What matters is that every entry in one archive shares a single root,
+    // not necessarily the literal string `package`. It is recorded and
+    // exposed as the `[root]` sub-target rather than passed to
+    // `strip_prefix` — see `Inspection::root`'s doc comment.
     let mut root: Option<String> = None;
 
     for entry in ar

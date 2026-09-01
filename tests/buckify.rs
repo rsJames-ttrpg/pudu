@@ -1,0 +1,583 @@
+//! `pudu buckify` end to end, against a mock registry.
+//!
+//! Hermetic: tarballs are built in-process, so the space-rooted `@types`
+//! case is exercised with no network and no dependence on the buck2 job.
+
+mod common;
+
+use std::io::Write as _;
+
+use httpmock::prelude::*;
+
+/// A gzipped tar whose entries all nest under `root`.
+///
+/// `root` is a parameter because the whole point of spec §1.1 is that it is
+/// not always `package`: `@types/node` unpacks to `node v22.20`, and that
+/// space is what broke `strip_prefix`.
+fn tarball_rooted(root: &str, files: &[(&str, &str)]) -> Vec<u8> {
+    let mut ar = tar::Builder::new(Vec::new());
+    for (path, body) in files {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        ar.append_data(&mut h, format!("{root}/{path}"), body.as_bytes())
+            .unwrap();
+    }
+    let bytes = ar.into_inner().unwrap();
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&bytes).unwrap();
+    gz.finish().unwrap()
+}
+
+/// `\x20` in the lockfile literals below is a literal space: a `\` at the end
+/// of a Rust string line strips the newline *and* the next line's leading
+/// whitespace, and YAML indentation is load-bearing.
+fn integrity_of(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha512};
+    let mut h = Sha512::new();
+    h.update(bytes);
+    format!(
+        "sha512-{}",
+        base64::engine::general_purpose::STANDARD.encode(h.finalize())
+    )
+}
+
+struct Fixture {
+    dir: tempfile::TempDir,
+    cache: tempfile::TempDir,
+    #[allow(dead_code)]
+    server: MockServer,
+}
+
+impl Fixture {
+    /// A project depending on four packages: `left-pad@1.3.0` (root
+    /// `package`, no bin), `tool@2.0.0` (root `package`, bin `cli.js`),
+    /// `@types/node@22.20.0` (root `node v22.20`, the space case) and
+    /// `mac-only@3.0.0` (`os: [darwin]`, surviving only on the second
+    /// configured platform).
+    fn new() -> Self {
+        let server = MockServer::start();
+        let plain = tarball_rooted("package", &[("package.json", r#"{"name":"left-pad"}"#)]);
+        let tool = tarball_rooted(
+            "package",
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"tool","bin":"cli.js","scripts":{"install":"node x"}}"#,
+                ),
+                ("cli.js", "#!/usr/bin/env node\n"),
+            ],
+        );
+        let types_node = tarball_rooted(
+            "node v22.20",
+            &[("package.json", r#"{"name":"@types/node"}"#)],
+        );
+        // `os: [darwin]`, so S2 prunes it away on `linux-x64-gnu` and it
+        // survives only because a second platform is configured.
+        let mac = tarball_rooted("package", &[("package.json", r#"{"name":"mac-only"}"#)]);
+
+        server.mock(|when, then| {
+            when.method(GET).path("/left-pad/-/left-pad-1.3.0.tgz");
+            then.status(200).body(plain.clone());
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/tool/-/tool-2.0.0.tgz");
+            then.status(200).body(tool.clone());
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/@types/node/-/node-22.20.0.tgz");
+            then.status(200).body(types_node.clone());
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/mac-only/-/mac-only-3.0.0.tgz");
+            then.status(200).body(mac.clone());
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        // Two platforms, deliberately — mirrors tests/vendor.rs: mac-only
+        // must survive into BUCK even though it is pruned on the first
+        // platform, since an http_archive does not vary by platform.
+        let config = format!(
+            "lockfile_path = \"pnpm-lock.yaml\"\n\
+             third_party_dir = \"third-party/js\"\n\n\
+             [platforms.linux-x64-gnu]\n\
+             os = \"linux\"\ncpu = \"x64\"\nlibc = \"glibc\"\n\n\
+             [platforms.darwin-arm64]\n\
+             os = \"darwin\"\ncpu = \"arm64\"\n\n\
+             [registry]\ndefault = \"{}\"\n",
+            server.base_url()
+        );
+        std::fs::write(dir.path().join("pudu.toml"), config).unwrap();
+
+        let lock = format!(
+            "lockfileVersion: '9.0'\n\n\
+             importers:\n\n  .:\n    dependencies:\n\
+             \x20     left-pad:\n        specifier: 1.3.0\n        version: 1.3.0\n\
+             \x20     tool:\n        specifier: 2.0.0\n        version: 2.0.0\n\
+             \x20     '@types/node':\n        specifier: 22.20.0\n        version: 22.20.0\n\
+             \x20   optionalDependencies:\n\
+             \x20     mac-only:\n        specifier: 3.0.0\n        version: 3.0.0\n\n\
+             packages:\n\n\
+             \x20 left-pad@1.3.0:\n    resolution: {{integrity: {}}}\n\n\
+             \x20 tool@2.0.0:\n    resolution: {{integrity: {}}}\n    hasBin: true\n\n\
+             \x20 '@types/node@22.20.0':\n    resolution: {{integrity: {}}}\n\n\
+             \x20 mac-only@3.0.0:\n    resolution: {{integrity: {}}}\n    os: [darwin]\n\n\
+             snapshots:\n\n  left-pad@1.3.0: {{}}\n\n  tool@2.0.0: {{}}\n\n\
+             \x20 '@types/node@22.20.0': {{}}\n\n\
+             \x20 mac-only@3.0.0: {{}}\n",
+            integrity_of(&plain),
+            integrity_of(&tool),
+            integrity_of(&types_node),
+            integrity_of(&mac),
+        );
+        std::fs::write(dir.path().join("pnpm-lock.yaml"), lock).unwrap();
+
+        Fixture {
+            dir,
+            cache: tempfile::tempdir().unwrap(),
+            server,
+        }
+    }
+
+    /// A project whose lockfile has no `packages:` section at all.
+    fn empty_lockfile() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let config = "lockfile_path = \"pnpm-lock.yaml\"\n\
+             third_party_dir = \"third-party/js\"\n\n\
+             [platforms.linux-x64-gnu]\n\
+             os = \"linux\"\ncpu = \"x64\"\nlibc = \"glibc\"\n\n\
+             [platforms.darwin-arm64]\n\
+             os = \"darwin\"\ncpu = \"arm64\"\n\n\
+             [registry]\ndefault = \"https://registry.npmjs.org\"\n";
+        std::fs::write(dir.path().join("pudu.toml"), config).unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .unwrap();
+        Fixture {
+            dir,
+            cache: tempfile::tempdir().unwrap(),
+            server: MockServer::start(),
+        }
+    }
+
+    fn cmd(&self) -> assert_cmd::Command {
+        let mut c = common::pudu(self.dir.path());
+        c.env("PUDU_CACHE_DIR", self.cache.path());
+        c
+    }
+
+    fn path(&self, rel: &str) -> std::path::PathBuf {
+        self.dir.path().join("third-party/js").join(rel)
+    }
+    fn read(&self, rel: &str) -> String {
+        std::fs::read_to_string(self.path(rel)).unwrap()
+    }
+    /// All three generated files, for byte-comparison across runs.
+    fn generated(&self) -> Vec<String> {
+        ["BUCK", "pudu.bzl", "config/BUCK"]
+            .iter()
+            .map(|n| self.read(n))
+            .collect()
+    }
+}
+
+/// TD-S4-05: the temp-file-and-rename write path must give generated files
+/// the same mode a plain `std::fs::write` would have produced, not
+/// `tempfile`'s hardcoded `0600`. The expectation is computed at runtime
+/// from a probe file in the same directory, so this passes under any
+/// umask.
+#[cfg(unix)]
+#[test]
+fn generated_files_get_the_umask_derived_mode_not_tempfiles_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    f.cmd().arg("buckify").assert().success();
+
+    let dir = f.dir.path().join("third-party/js");
+    let probe = dir.join(".mode-probe-expected");
+    std::fs::write(&probe, b"x").unwrap();
+    let expected = std::fs::metadata(&probe).unwrap().permissions().mode() & 0o777;
+    std::fs::remove_file(&probe).unwrap();
+
+    for rel in ["packages.toml", "BUCK", "pudu.bzl", "config/BUCK"] {
+        let mode = std::fs::metadata(f.path(rel)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, expected,
+            "{rel} should have the umask-derived mode {expected:o}, got {mode:o}"
+        );
+        // Only meaningful when the umask makes 0600 the *wrong* answer.
+        // Under `umask 077` the correct mode IS 0600, and asserting
+        // otherwise would fail on correct behaviour — which is the
+        // hardcoded assumption computing `expected` at runtime exists to
+        // avoid.
+        if expected != 0o600 {
+            assert_ne!(mode, 0o600, "{rel} must not be left at tempfile's 0600");
+        }
+    }
+}
+
+#[test]
+fn buckify_writes_three_files_and_a_second_run_is_byte_identical() {
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    f.cmd().arg("buckify").assert().success();
+
+    let first = f.generated();
+    f.cmd().arg("buckify").assert().success();
+    assert_eq!(first, f.generated(), "buckify must be deterministic");
+}
+
+#[test]
+fn the_space_rooted_package_emits_its_real_root_and_no_strip_prefix() {
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    f.cmd().arg("buckify").assert().success();
+
+    let buck = f.read("BUCK");
+    assert!(buck.contains(r#"name = "@types+node@22.20.0","#), "{buck}");
+    assert!(buck.contains(r#"root = "node v22.20","#), "{buck}");
+    assert!(
+        !f.read("pudu.bzl").contains("strip_prefix ="),
+        "spec §1.1: strip_prefix reaches a shell unquoted"
+    );
+}
+
+#[test]
+fn a_package_surviving_on_only_one_platform_still_gets_a_target() {
+    // The emitted set is the union across platforms: an http_archive does not
+    // vary by platform, and a macOS-only package must not vanish from a
+    // buckify run on Linux.
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    f.cmd().arg("buckify").assert().success();
+    assert!(f.read("BUCK").contains(r#"name = "mac-only@3.0.0","#));
+}
+
+#[test]
+fn buckify_without_a_package_table_fails_before_writing_anything() {
+    let f = Fixture::new();
+    let out = f.cmd().arg("buckify").output().unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    assert!(
+        !f.path("BUCK").exists(),
+        "no file may be written on failure"
+    );
+    assert!(!f.path("config/BUCK").exists());
+}
+
+#[test]
+fn check_passes_on_fresh_output_and_fails_after_an_edit() {
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    f.cmd().arg("buckify").assert().success();
+    f.cmd().args(["buckify", "--check"]).assert().success();
+
+    std::fs::write(f.path("BUCK"), "# hand-edited\n").unwrap();
+    let out = f.cmd().args(["buckify", "--check"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&f.path("BUCK").display().to_string()),
+        "the diagnostic must name the file that differs: {stderr}"
+    );
+}
+
+#[test]
+fn check_fails_when_a_generated_file_is_missing_entirely() {
+    // A tree that has never been buckified must fail --check, not pass it.
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    f.cmd().arg("buckify").assert().success();
+    std::fs::remove_file(f.path("config/BUCK")).unwrap();
+    let out = f.cmd().args(["buckify", "--check"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(5));
+}
+
+#[cfg(unix)]
+#[test]
+fn check_reports_an_unreadable_file_distinctly_from_stale() {
+    // An unreadable file is not "differs" — "run `pudu buckify`" cannot fix
+    // a permission problem, so it must surface as its own diagnostic naming
+    // the path rather than being folded into `pudu::buckify::stale`.
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    f.cmd().arg("buckify").assert().success();
+
+    let buck_path = f.path("BUCK");
+    let mut perms = std::fs::metadata(&buck_path).unwrap().permissions();
+    perms.set_mode(0o000);
+    std::fs::set_permissions(&buck_path, perms.clone()).unwrap();
+
+    let out = f.cmd().args(["buckify", "--check"]).output().unwrap();
+
+    perms.set_mode(0o644);
+    std::fs::set_permissions(&buck_path, perms).unwrap();
+
+    // Root ignores file permission bits; skip the assertion under a root
+    // test runner rather than failing spuriously.
+    let is_root = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false);
+    if is_root {
+        return;
+    }
+
+    assert_eq!(out.status.code(), Some(1), "internal, not stale (5)");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("pudu::buckify::read_failed"), "{stderr}");
+    assert!(
+        stderr.contains(&buck_path.display().to_string()),
+        "the diagnostic must name the unreadable path: {stderr}"
+    );
+}
+
+#[test]
+fn buckify_replaces_inits_placeholder_buck() {
+    // `init` seeds `# Generated by pudu. Run: pudu buckify` and its own
+    // comment says files under third-party/js are never overwritten. Spec §3
+    // makes the three generated files an explicit exception.
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.path("BUCK").parent().unwrap()).unwrap();
+    std::fs::write(f.path("BUCK"), "# Generated by pudu. Run: pudu buckify\n").unwrap();
+    f.cmd().arg("vendor").assert().success();
+    f.cmd().arg("buckify").assert().success();
+    assert!(f.read("BUCK").contains("npm_package("));
+}
+
+#[test]
+fn the_generated_files_carry_the_generated_banner() {
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+    f.cmd().arg("buckify").assert().success();
+    for name in ["BUCK", "pudu.bzl", "config/BUCK"] {
+        assert!(
+            f.read(name)
+                .starts_with("##\n## @generated by pudu\n## Do not edit by hand.\n##\n"),
+            "{name} must open with the generated banner"
+        );
+    }
+}
+
+/// Recursively copies `src` into `dst`, skipping `prelude`, `buck-out` and
+/// `none`: they are not needed by the test and `prelude` would be enormous
+/// if present locally (a developer's real checkout, not the fixture's own
+/// gitignored one).
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name == "prelude" || name == "buck-out" || name == "none" {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if entry.file_type().unwrap().is_dir() {
+            std::fs::create_dir_all(&to).unwrap();
+            copy_dir(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
+#[test]
+fn the_pure_js_fixture_emits_stable_output() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/buck/01-pure-js");
+    // Copy to a temp dir: the test writes generated files, and a test that
+    // mutates its own fixture is a test that passes only the first time.
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&dir, tmp.path());
+
+    common::pudu(tmp.path()).arg("buckify").assert().success();
+
+    let tp = tmp.path().join("third-party/js");
+    let buck = std::fs::read_to_string(tp.join("BUCK")).unwrap();
+
+    // The label is a Buck cell path, not a filesystem path. This bug shipped
+    // through four tasks because emit.rs's unit test passes a relative label
+    // by hand and nothing asserted on the CLI's own output.
+    assert!(
+        buck.contains(r#"load("//third-party/js:pudu.bzl""#),
+        "the load label must be cell-relative: {buck}"
+    );
+    assert!(
+        !buck.contains(r#"load("///"#),
+        "absolute path leaked into the label"
+    );
+
+    insta::assert_snapshot!("pure_js_BUCK", buck);
+    insta::assert_snapshot!(
+        "pure_js_pudu_bzl",
+        std::fs::read_to_string(tp.join("pudu.bzl")).unwrap()
+    );
+    insta::assert_snapshot!(
+        "pure_js_config_BUCK",
+        std::fs::read_to_string(tp.join("config/BUCK")).unwrap()
+    );
+}
+
+/// Runs `buckify` with `third_party_dir` set to `raw` and asserts it is
+/// rejected as `InputInvalid` (exit 3) with the `unusable_third_party_dir`
+/// diagnostic code, and that nothing is written.
+fn assert_third_party_dir_rejected(raw: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = format!(
+        "lockfile_path = \"pnpm-lock.yaml\"\nthird_party_dir = \"{raw}\"\n\n\
+         [platforms.linux-x64-gnu]\nos = \"linux\"\ncpu = \"x64\"\nlibc = \"glibc\"\n"
+    );
+    std::fs::write(dir.path().join("pudu.toml"), config).unwrap();
+    std::fs::write(
+        dir.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )
+    .unwrap();
+
+    let out = common::pudu(dir.path()).arg("buckify").output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "InputInvalid, not a panic or a silently-written unparseable BUCK for `{raw}`"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("pudu::buckify::unusable_third_party_dir"),
+        "for `{raw}`: {stderr}"
+    );
+
+    // The directory the (rejected) `third_party_dir` would resolve to must
+    // never even be created — validation runs before any filesystem write.
+    let expected = if std::path::Path::new(raw).is_absolute() {
+        std::path::PathBuf::from(raw)
+    } else {
+        dir.path().join(raw)
+    };
+    assert!(
+        !expected.exists(),
+        "no directory may be created on failure for `{raw}`"
+    );
+}
+
+#[test]
+fn an_absolute_third_party_dir_is_rejected_rather_than_emitting_an_unparseable_label() {
+    // The path must be writable, or `pudu.toml` validation rejects it first
+    // with a different diagnostic (`third_party_not_writable`) before ever
+    // reaching the label guard this test exercises.
+    let writable = tempfile::tempdir().unwrap();
+    let abs = writable.path().join("third-party/js");
+    assert_third_party_dir_rejected(&abs.display().to_string());
+}
+
+#[test]
+fn a_dot_prefixed_third_party_dir_is_rejected() {
+    assert_third_party_dir_rejected("./third-party/js");
+}
+
+#[test]
+fn a_trailing_slash_third_party_dir_is_rejected() {
+    assert_third_party_dir_rejected("third-party/js/");
+}
+
+#[test]
+fn a_dot_dot_third_party_dir_is_rejected() {
+    assert_third_party_dir_rejected("../shared/tp");
+}
+
+#[test]
+fn an_ordinary_third_party_dir_is_accepted() {
+    // The guard must reject only genuinely unusable input, not ordinary
+    // relative paths — this is the passing case beside the four rejections
+    // above.
+    let f = Fixture::empty_lockfile();
+    f.cmd().arg("buckify").assert().success();
+    assert!(f.path("BUCK").exists());
+}
+
+#[test]
+fn a_bin_name_buck2_cannot_address_fails_buckify_end_to_end() {
+    // `UnrepresentableBinName` was previously driven only from hand-built
+    // `Entry` values in unit tests — exactly the "input supplied by hand at
+    // the layer under test" pattern that hid the load-label bug this branch
+    // already fixed once. This drives it through the real hermetic
+    // pipeline: a package whose `package.json` declares a bin name npm
+    // permits (`tarball::is_url_safe` allows `!`) but buck2 does not.
+    let server = MockServer::start();
+    let tool = tarball_rooted(
+        "package",
+        &[(
+            "package.json",
+            r#"{"name":"bangtool","bin":{"foo!":"x.js"}}"#,
+        )],
+    );
+    server.mock(|when, then| {
+        when.method(GET).path("/bangtool/-/bangtool-1.0.0.tgz");
+        then.status(200).body(tool.clone());
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = format!(
+        "lockfile_path = \"pnpm-lock.yaml\"\n\
+         third_party_dir = \"third-party/js\"\n\n\
+         [platforms.linux-x64-gnu]\n\
+         os = \"linux\"\ncpu = \"x64\"\nlibc = \"glibc\"\n\n\
+         [registry]\ndefault = \"{}\"\n",
+        server.base_url()
+    );
+    std::fs::write(dir.path().join("pudu.toml"), config).unwrap();
+
+    let lock = format!(
+        "lockfileVersion: '9.0'\n\n\
+         importers:\n\n  .:\n    dependencies:\n\
+         \x20     bangtool:\n        specifier: 1.0.0\n        version: 1.0.0\n\n\
+         packages:\n\n\
+         \x20 bangtool@1.0.0:\n    resolution: {{integrity: {}}}\n    hasBin: true\n\n\
+         snapshots:\n\n  bangtool@1.0.0: {{}}\n",
+        integrity_of(&tool),
+    );
+    std::fs::write(dir.path().join("pnpm-lock.yaml"), lock).unwrap();
+
+    let cache = tempfile::tempdir().unwrap();
+    let mut vendor_cmd = common::pudu(dir.path());
+    vendor_cmd.env("PUDU_CACHE_DIR", cache.path());
+    vendor_cmd.arg("vendor").assert().success();
+
+    let mut buckify_cmd = common::pudu(dir.path());
+    buckify_cmd.env("PUDU_CACHE_DIR", cache.path());
+    let out = buckify_cmd.arg("buckify").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(3), "InputInvalid");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("pudu::buckify::unrepresentable_bin_name"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("bangtool"), "{stderr}");
+    assert!(
+        !dir.path().join("third-party/js/BUCK").exists(),
+        "no file may be written on failure"
+    );
+}
+
+#[test]
+fn a_lockfile_with_no_packages_emits_an_empty_buck() {
+    // staleness() reports nothing when there is nothing expected, so this
+    // path reaches the emitter with no package table at all. It must emit an
+    // empty BUCK rather than panicking.
+    let f = Fixture::empty_lockfile();
+    f.cmd().arg("buckify").assert().success();
+    let buck = f.read("BUCK");
+    // The `load(...)` line still names the macro (it is always emitted, used
+    // or not); what must be absent is an actual rule instance.
+    assert!(!buck.contains("npm_package("), "{buck}");
+    assert!(buck.starts_with("##\n## @generated by pudu\n"));
+}
