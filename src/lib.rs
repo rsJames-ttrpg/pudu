@@ -2,6 +2,7 @@
 //!
 //! No public API is committed in v1.
 
+pub mod buck;
 pub mod cache;
 pub mod cli;
 pub mod config;
