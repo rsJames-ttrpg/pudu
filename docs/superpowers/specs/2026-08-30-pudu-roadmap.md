@@ -87,20 +87,20 @@ Stage spec: [S1](2026-08-31-pudu-s1-lockfile-design.md).
 
 ---
 
-### S3 — `pudu vendor` & the pudu.lock sidecar
+### S3 — `pudu vendor` & the package table
 
-**Scope:** Registry URL derivation with scope overrides. Tarball fetch. sha512 verification against the lockfile. `package.json` inspection for `bin` and install scripts. Deterministic `pudu.lock` writing. `--check` staleness gate. `~/.cache/pudu/` content-addressed download cache.
+**Scope:** Registry URL derivation with scope overrides. Tarball fetch. sha512 verification against the lockfile. `package.json` inspection for `bin` and install scripts. Deterministic `packages.toml` writing. `--check` staleness gate. `~/.cache/pudu/` content-addressed download cache.
 
 **Exit criteria:**
-- `pudu vendor` writes a deterministic, sorted `pudu.lock` covering every package in the graph.
+- `pudu vendor` writes a deterministic, sorted `packages.toml` covering every package in the graph.
 - A tarball whose bytes fail the lockfile's sha512 aborts with a precise error naming the package.
-- `pudu vendor --check` exits non-zero when `pudu.lock` is stale, zero when current.
+- `pudu vendor --check` exits non-zero when `packages.toml` is stale, zero when current.
 - `--no-network` with a warm cache succeeds; with a cold cache it errors naming the missing package.
 - Scoped-registry override resolves to the right host; the resolved URL is recorded.
 
-**Demo:** `pudu vendor` on a 200-package lockfile produces a `pudu.lock` that a second run reproduces byte-identically.
+**Demo:** `pudu vendor` on a 200-package lockfile produces a `packages.toml` that a second run reproduces byte-identically.
 
-**Touches:** `src/registry.rs`, `src/tarball.rs`, `src/sidecar.rs`, `src/cache.rs`.
+**Touches:** `src/registry.rs`, `src/tarball.rs`, `src/packages.rs`, `src/cache.rs`.
 
 ---
 
@@ -141,7 +141,7 @@ This stage resolves three design §12 unknowns: `filegroup` scale on a realistic
 
 ### S6 — Lifecycle-script gate
 
-**Scope:** The script gate using `has_install_script` from `pudu.lock`. The `[scripts] allow` acknowledgement list. The precise error message contracted in design §6.
+**Scope:** The script gate using `has_install_script` from `packages.toml`. The `[scripts] allow` acknowledgement list. The precise error message contracted in design §6.
 
 **Exit criteria:**
 - `09-install-script-error` asserts the error message byte-for-byte with the tuple substituted.
@@ -206,7 +206,7 @@ Split into two sub-stages, following muntjac's S7a/S7b precedent — layering is
 
 Deferred deliberately; sequenced after real-world feedback.
 
-- **S10 — Vendor mode.** Commit tarballs; swap `http_archive` for local source refs. `pudu.lock` already carries what's needed.
+- **S10 — Vendor mode.** Commit tarballs; swap `http_archive` for local source refs. `packages.toml` already carries what's needed.
 - **S11 — Audit + unused.** OSV cross-check against the GitHub Advisory Database; report vendored tarballs no importer references. Depends on S10.
 - **S12 — Multi-lockfile trees.** muntjac's `[tree.<name>]` model, for repos with genuinely separate lockfiles.
 - **S13 — Lifecycle-script execution.** Run allowlisted scripts in a sandboxed Buck rule.
@@ -225,7 +225,7 @@ Deferred deliberately; sequenced after real-world feedback.
               │                         │
               └────────────┬────────────┘
                            ▼
-                   S3 (vendor + sidecar)
+                   S3 (vendor + package table)
                            │
                            ▼
                    S4 (first BUCK)
@@ -266,6 +266,7 @@ S1 and S2 can be developed in parallel after S0; both feed S3.
 | S1 | [2026-08-31-pudu-s1-lockfile-design.md](./2026-08-31-pudu-s1-lockfile-design.md) | [2026-08-31-pudu-s1-lockfile.md](../plans/2026-08-31-pudu-s1-lockfile.md) | ✅ shipped |
 | S2 | [2026-08-31-pudu-s2-platforms-design.md](./2026-08-31-pudu-s2-platforms-design.md) | [2026-08-31-pudu-s2-platforms.md](../plans/2026-08-31-pudu-s2-platforms.md) | ✅ shipped (17 commits, 247 tests) |
 | S3 | [2026-08-31-pudu-s3-vendor-design.md](./2026-08-31-pudu-s3-vendor-design.md) | [2026-08-31-pudu-s3-vendor.md](../plans/2026-08-31-pudu-s3-vendor.md) | ✅ shipped |
+| S3.5 | [2026-09-01-pudu-s3.5-package-table-design.md](./2026-09-01-pudu-s3.5-package-table-design.md) | [2026-09-01-pudu-s3.5-package-table.md](../plans/2026-09-01-pudu-s3.5-package-table.md) | ✅ shipped |
 | S4–S9 | (not yet written) | (not yet written) | ⬜ planned |
 
 ---

@@ -50,9 +50,9 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// Fetch tarballs and write pudu.lock.
+    /// Fetch tarballs and write packages.toml.
     Vendor {
-        /// Exit non-zero if pudu.lock is stale.
+        /// Exit non-zero if packages.toml is stale.
         #[arg(long)]
         check: bool,
         /// Maximum parallel downloads.

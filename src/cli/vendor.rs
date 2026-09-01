@@ -1,8 +1,8 @@
-//! `pudu vendor` — the download pass and the `pudu.lock` sidecar.
+//! `pudu vendor` — the download pass and the `packages.toml` package table.
 //!
 //! Vendors the union of packages surviving S2's pruning on at least one
-//! configured platform. That makes `pudu.lock` a function of `pudu.toml` as
-//! well as of the lockfile: adding a platform makes the sidecar stale, and
+//! configured platform. That makes `packages.toml` a function of `pudu.toml`
+//! as well as of the lockfile: adding a platform makes the table stale, and
 //! `--check` catches it. Intended, not incidental — a config change genuinely
 //! changes which tarballs the build needs.
 
@@ -17,9 +17,9 @@ use crate::error::{VendorError, VendorWarning, render};
 use crate::fetch::{Fetcher, Request};
 use crate::lock::Graph;
 use crate::lock::types::Resolution;
+use crate::packages::{self, Entry, Expected, Loaded, PackageTable};
 use crate::platform::prune::prune;
 use crate::registry::tarball_url;
-use crate::sidecar::{self, Entry, Expected, Loaded, Sidecar};
 
 /// Everything the download pass needs, computed with no network at all.
 #[derive(Debug)]
@@ -46,13 +46,13 @@ pub fn run(check: bool, jobs: usize, no_network: bool, verbose: bool) -> Result<
     let plan = build_plan(&graph, &matrix, &config)?;
 
     let base = std::env::current_dir()?;
-    let sidecar_path = base.join(&config.third_party_dir).join("pudu.lock");
-    let loaded = sidecar::load(&sidecar_path)?;
+    let table_path = base.join(&config.third_party_dir).join("packages.toml");
+    let loaded = packages::load(&table_path)?;
 
     if check {
         return run_check(&plan, &loaded);
     }
-    run_vendor(plan, loaded, &sidecar_path, jobs, no_network, verbose)
+    run_vendor(plan, loaded, &table_path, jobs, no_network, verbose)
 }
 
 /// Resolve every surviving package to a URL and an integrity, with no
@@ -135,7 +135,7 @@ fn build_plan(
     Ok(plan)
 }
 
-/// Whether an existing sidecar entry already reflects `req`, so no fetch is
+/// Whether an existing table entry already reflects `req`, so no fetch is
 /// needed.
 ///
 /// Both fields must match. The URL alone is not enough: a package can move
@@ -149,9 +149,12 @@ fn is_carried_over(existing: Option<&Entry>, req: &Request) -> bool {
 }
 
 fn run_check(plan: &Plan, loaded: &Loaded) -> Result<()> {
-    let differences = sidecar::staleness(&plan.expected, loaded);
+    let differences = packages::staleness(&plan.expected, loaded);
     if differences.is_empty() {
-        eprintln!("pudu.lock is up to date ({} packages)", plan.expected.len());
+        eprintln!(
+            "packages.toml is up to date ({} packages)",
+            plan.expected.len()
+        );
         return Ok(());
     }
     // The error carries the count; the detail goes out here so the user sees
@@ -168,7 +171,7 @@ fn run_check(plan: &Plan, loaded: &Loaded) -> Result<()> {
 fn run_vendor(
     plan: Plan,
     loaded: Loaded,
-    sidecar_path: &Path,
+    table_path: &Path,
     jobs: usize,
     no_network: bool,
     verbose: bool,
@@ -181,7 +184,7 @@ fn run_vendor(
     // Carry over anything already recorded at the same URL and hash. A
     // one-package version bump costs one download. The trade is explicit: a
     // recorded sha256 is never re-checked against upstream once written,
-    // which is also what makes pudu.lock an audit artifact.
+    // which is also what makes `packages.toml` an audit artifact.
     let mut entries: BTreeMap<String, Entry> = BTreeMap::new();
     let mut todo: Vec<Request> = Vec::new();
     let mut unchanged = 0usize;
@@ -257,11 +260,11 @@ fn run_vendor(
         return Err(failures.swap_remove(0).into());
     }
 
-    let sidecar = Sidecar { entries };
-    write_atomic(sidecar_path, &sidecar.render())?;
+    let table = PackageTable { entries };
+    write_atomic(table_path, &table.render())?;
     eprintln!(
         "vendored {} packages ({} downloaded, {} cached, {} unchanged)",
-        sidecar.entries.len(),
+        table.entries.len(),
         stats.downloaded,
         stats.cached,
         unchanged
@@ -270,7 +273,7 @@ fn run_vendor(
 }
 
 /// Write via a temporary file and rename, so an interrupted run leaves the
-/// previous sidecar intact rather than a half-written one.
+/// previous table intact rather than a half-written one.
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

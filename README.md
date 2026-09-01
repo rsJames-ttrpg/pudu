@@ -19,9 +19,9 @@ pudu is the world's smallest deer. reindeer does Cargo, muntjac does uv, pudu do
 - **S0 — scaffolding.** `pudu init` detects a pnpm workspace, derives a platform matrix from `supportedArchitectures`, and writes `pudu.toml`, a `third-party/js/` skeleton, and a marker-delimited Node toolchain into `toolchains/BUCK`. `pudu config check` validates `pudu.toml`, in human or JSON output.
 - **S1 — lockfile.** `pnpm-lock.yaml` v9 is parsed in full and turned into the instance graph, one node per snapshot key, with peer-dependency instances kept distinct.
 - **S2 — platforms.** Every node is pruned per configured platform using npm's `os` / `cpu` / `libc` fields, reproducing pnpm's own matching rules.
-- **S3 — vendor.** `pudu vendor` downloads the tarball for every package surviving on at least one configured platform, verifies each against the sha512 `pnpm-lock.yaml` records, inspects the archive for its bin map and install-script triggers, and writes a committed, deterministic `<third_party_dir>/pudu.lock`. `pudu vendor --check` is an offline CI gate that exits 5 when the sidecar is stale.
+- **S3 — vendor.** `pudu vendor` downloads the tarball for every package surviving on at least one configured platform, verifies each against the sha512 `pnpm-lock.yaml` records, inspects the archive for its bin map and install-script triggers, and writes a committed, deterministic `<third_party_dir>/packages.toml`. `pudu vendor --check` is an offline CI gate that exits 5 when the package table is stale.
 
-**Not yet.** pudu cannot emit BUCK: `buckify` (S4), `fixups` (S7/S8), `audit`, and `unused` are listed in `--help` and exit 2 with the stage that will implement them. S4 (emitting build rules from `pudu.lock`) is next. See the [design spec](docs/superpowers/specs/2026-08-30-pudu-design.md) and [roadmap](docs/superpowers/specs/2026-08-30-pudu-roadmap.md).
+**Not yet.** pudu cannot emit BUCK: `buckify` (S4), `fixups` (S7/S8), `audit`, and `unused` are listed in `--help` and exit 2 with the stage that will implement them. S4 (emitting build rules from `packages.toml`) is next. See the [design spec](docs/superpowers/specs/2026-08-30-pudu-design.md) and [roadmap](docs/superpowers/specs/2026-08-30-pudu-roadmap.md).
 
 ## Planned quickstart
 
@@ -29,7 +29,7 @@ pudu is the world's smallest deer. reindeer does Cargo, muntjac does uv, pudu do
 cargo install pudu
 cd my-pnpm-repo           # contains pnpm-lock.yaml
 pudu init                 # writes pudu.toml + third-party/js/ skeleton
-pudu vendor               # fetch tarballs, verify integrity, write pudu.lock (works today)
+pudu vendor               # fetch tarballs, verify integrity, write packages.toml (works today)
 pudu buckify              # emit BUCK + pudu.bzl + config/BUCK (S4)
 buck2 run //packages/server:server
 ```
@@ -43,7 +43,7 @@ pudu never runs pnpm. pnpm has already done the hard part — resolution, peer-d
 1. **Parse** `pnpm-lock.yaml` (lockfileVersion `9.0`) — `importers`, `packages`, `snapshots`.
 2. **Build the instance graph**, one node per snapshot key. pnpm encodes peer resolutions in the key itself (`react-dom@18.3.1(react@18.3.1)`), so the same package at one version can appear as several instances with different dependency sets. Each gets its own Buck target.
 3. **Prune per platform** using npm's `os` / `cpu` / `libc` fields. This is the only axis of variance — pnpm resolves once, platform-independently. `esbuild` optionally depends on ~20 `@esbuild/*` packages; exactly one survives per platform.
-4. **Fetch tarballs once** (`pudu vendor`) to record what the lockfile omits, into a committed `pudu.lock` sidecar.
+4. **Fetch tarballs once** (`pudu vendor`) to record what the lockfile omits, into a committed `packages.toml` package table.
 5. **Emit** a deterministic `BUCK`. Same inputs, byte-identical output.
 
 ### Why `pudu vendor` is mandatory

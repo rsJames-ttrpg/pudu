@@ -23,7 +23,7 @@ rejection · `pudu debug print-graph`.
 
 **Out of scope, and deliberately so:** platform pruning by `os`/`cpu`/`libc`
 (S2 — S1 *carries* those fields on the node but never acts on them) ·
-tarball fetch, URLs, `pudu.lock` (S3) · BUCK emission (S4) · fixups (S6).
+tarball fetch, URLs, `packages.toml` (S3) · BUCK emission (S4) · fixups (S6).
 
 ---
 
