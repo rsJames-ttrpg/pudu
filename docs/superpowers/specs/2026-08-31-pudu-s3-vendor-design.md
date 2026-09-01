@@ -203,10 +203,27 @@ The order matters: sha256 is only ever recorded for bytes whose sha512 already
 verified. That is the whole trust chain, and it is why `pudu.lock` is worth
 committing.
 
-**Archive shape.** The first path component must be `package` for every entry.
-Design §8 emits `strip_prefix = "package"`, so an archive rooted anywhere else
-would break at build time; failing here instead makes the error land where the
-cause is. A violation is `MalformedTarball`.
+**Archive shape.** Every entry must share a **single root directory** — but
+that root is not required to be `package`.
+
+An earlier revision of this section required the first path component to be
+literally `package`, on the strength of design §8's `strip_prefix =
+"package"`. That is false of the real registry: DefinitelyTyped's
+types-publisher nests each `@types/*` package under its own display name, so
+`@types/estree` unpacks to `estree/` and `@types/node@22.20.x` to `node
+v22.20/` — a space and all. The fixture has 18 `@types/*` entries, every one
+of them a counterexample. Requiring `package` rejected all of them as
+malformed.
+
+What pudu enforces instead is consistency: an archive whose entries disagree
+about their root cannot be extracted to one directory, and that is
+`MalformedTarball`. The root it settles on is recorded as the sidecar's
+`root` field (§6) and is what design §8 must pass to `strip_prefix`.
+
+Tar metadata members — `pax_global_header`, emitted by GNU tar's default pax
+format and by `git archive` — are not part of the directory tree and are
+skipped before the consistency check, or a valid archive from a private
+registry would be rejected for having two roots.
 
 ### 5.1 `has_install_script`
 
