@@ -63,6 +63,9 @@ impl Fixture {
             ),
             ("cli.js", "#!/usr/bin/env node\n"),
         ]);
+        // `os: [darwin]`, so S2 prunes it away on `linux-x64-gnu` and it
+        // survives only because a second platform is configured.
+        let mac = tarball(&[("package.json", r#"{"name":"mac-only"}"#)]);
 
         server.mock(|when, then| {
             when.method(GET).path("/left-pad/-/left-pad-1.3.0.tgz");
@@ -72,13 +75,23 @@ impl Fixture {
             when.method(GET).path("/tool/-/tool-2.0.0.tgz");
             then.status(200).body(tool.clone());
         });
+        server.mock(|when, then| {
+            when.method(GET).path("/mac-only/-/mac-only-3.0.0.tgz");
+            then.status(200).body(mac.clone());
+        });
 
         let dir = tempfile::tempdir().unwrap();
+        // Two platforms, deliberately. `pudu.lock` is meant to be the union
+        // of what survives pruning on *any* configured platform, and with a
+        // single platform configured a first-platform-wins bug would be
+        // indistinguishable from the correct behaviour.
         let mut config = format!(
             "lockfile_path = \"pnpm-lock.yaml\"\n\
              third_party_dir = \"third-party/js\"\n\n\
              [platforms.linux-x64-gnu]\n\
              os = \"linux\"\ncpu = \"x64\"\nlibc = \"glibc\"\n\n\
+             [platforms.darwin-arm64]\n\
+             os = \"darwin\"\ncpu = \"arm64\"\n\n\
              [registry]\ndefault = \"{}\"\n",
             server.base_url()
         );
@@ -91,13 +104,18 @@ impl Fixture {
             "lockfileVersion: '9.0'\n\n\
              importers:\n\n  .:\n    dependencies:\n\
              \x20     left-pad:\n        specifier: 1.3.0\n        version: 1.3.0\n\
-             \x20     tool:\n        specifier: 2.0.0\n        version: 2.0.0\n\n\
+             \x20     tool:\n        specifier: 2.0.0\n        version: 2.0.0\n\
+             \x20   optionalDependencies:\n\
+             \x20     mac-only:\n        specifier: 3.0.0\n        version: 3.0.0\n\n\
              packages:\n\n\
              \x20 left-pad@1.3.0:\n    resolution: {{integrity: {}}}\n\n\
              \x20 tool@2.0.0:\n    resolution: {{integrity: {}}}\n    hasBin: true\n\n\
-             snapshots:\n\n  left-pad@1.3.0: {{}}\n\n  tool@2.0.0: {{}}\n",
+             \x20 mac-only@3.0.0:\n    resolution: {{integrity: {}}}\n    os: [darwin]\n\n\
+             snapshots:\n\n  left-pad@1.3.0: {{}}\n\n  tool@2.0.0: {{}}\n\n\
+             \x20 mac-only@3.0.0: {{}}\n",
             integrity_of(&plain),
             integrity_of(&tool),
+            integrity_of(&mac),
         );
         std::fs::write(dir.path().join("pnpm-lock.yaml"), lock).unwrap();
 
@@ -139,13 +157,56 @@ fn vendor_writes_a_sidecar_covering_every_package() {
     assert!(text.contains("has_install_script = true"), "{text}");
     assert_eq!(
         text.matches("sha256 = ").count(),
-        2,
+        3,
         "every entry records a sha256:\n{text}"
     );
     assert_eq!(
         text.matches(r#"root = "package""#).count(),
-        2,
+        3,
         "every entry records the archive root a build rule will strip:\n{text}"
+    );
+}
+
+#[test]
+fn the_vendored_set_is_the_union_across_platforms_not_one_platform_s_view() {
+    // `mac-only@3.0.0` is `os: [darwin]`, so it survives pruning on
+    // `darwin-arm64` and nothing else. Vendoring it is the only offline proof
+    // that the download set is the union over every configured platform
+    // rather than the first platform's view — the whole basis for
+    // "`pudu.lock` is a function of `pudu.toml`".
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+
+    let text = f.sidecar();
+    assert!(
+        text.contains(r#"["mac-only@3.0.0"]"#),
+        "a darwin-only package must be vendored when darwin-arm64 is configured:\n{text}"
+    );
+    assert!(text.contains(r#"["left-pad@1.3.0"]"#), "{text}");
+}
+
+#[test]
+fn dropping_a_platform_makes_the_sidecar_stale() {
+    // The other direction of the same invariant: the union shrinks with the
+    // config, and `--check` is what catches it in CI.
+    let f = Fixture::new();
+    f.cmd().arg("vendor").assert().success();
+
+    let config = std::fs::read_to_string(f.dir.path().join("pudu.toml")).unwrap();
+    let cut = config.find("[platforms.darwin-arm64]").unwrap();
+    let end = config.find("[registry]").unwrap();
+    std::fs::write(
+        f.dir.path().join("pudu.toml"),
+        format!("{}{}", &config[..cut], &config[end..]),
+    )
+    .unwrap();
+
+    let out = f.cmd().args(["vendor", "--check"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("mac-only@3.0.0"),
+        "the entry left behind by dropping darwin must be reported:\n{stderr}"
     );
 }
 
@@ -159,14 +220,42 @@ fn a_second_run_reproduces_the_sidecar_byte_for_byte() {
 }
 
 #[test]
+fn a_re_download_from_a_cold_cache_reproduces_the_sidecar_byte_for_byte() {
+    // `a_second_run_reproduces_the_sidecar_byte_for_byte` carries every entry
+    // over and downloads nothing, so it never exercises the parallel path.
+    // Deleting the sidecar *and* the cache forces a genuine concurrent
+    // re-fetch of every package, which is where a non-deterministic
+    // collection or a completion-order dependency would show up.
+    let f = Fixture::new();
+    f.cmd().args(["vendor", "--jobs", "4"]).assert().success();
+    let first = f.sidecar();
+
+    std::fs::remove_file(f.sidecar_path()).unwrap();
+    std::fs::remove_dir_all(f.cache.path().join("tarballs")).unwrap();
+
+    let out = f.cmd().args(["vendor", "--jobs", "4"]).output().unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("3 downloaded") && stderr.contains("0 unchanged"),
+        "this must be a real re-download, not a carry-over:\n{stderr}"
+    );
+    assert_eq!(
+        first,
+        f.sidecar(),
+        "a parallel re-download must reproduce the sidecar byte for byte"
+    );
+}
+
+#[test]
 fn a_second_run_downloads_nothing() {
     let f = Fixture::new();
     f.cmd().arg("vendor").assert().success();
     let out = f.cmd().arg("vendor").output().unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("0 downloaded") && stderr.contains("2 unchanged"),
-        "the second run must carry both entries over:\n{stderr}"
+        stderr.contains("0 downloaded") && stderr.contains("3 unchanged"),
+        "the second run must carry every entry over:\n{stderr}"
     );
 }
 
