@@ -6,6 +6,7 @@ pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod fetch;
 pub mod lock;
 pub mod platform;
 pub mod registry;
