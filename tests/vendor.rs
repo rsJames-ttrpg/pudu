@@ -235,6 +235,43 @@ fn no_network_against_a_cold_cache_names_the_missing_package() {
         "{stderr}"
     );
     assert!(stderr.contains("--no-network"), "{stderr}");
+    // Exit criterion 4 asks for the package *and its URL*. `--no-network`
+    // alone is satisfied by the help text, so it proves nothing about the
+    // error itself.
+    assert!(
+        stderr.contains(&format!(
+            "{}/left-pad/-/left-pad-1.3.0.tgz",
+            f.server.base_url()
+        )) || stderr.contains(&format!("{}/tool/-/tool-2.0.0.tgz", f.server.base_url())),
+        "the error must name the URL that would have been fetched:\n{stderr}"
+    );
+}
+
+#[test]
+fn a_corrupt_sidecar_reports_the_underlying_parse_error() {
+    // "cannot read pudu.lock" on its own leaves the user guessing. The
+    // `reason` — a TOML parse error with its line number, or an io error for
+    // a permissions failure — is the whole diagnosis.
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.sidecar_path().parent().unwrap()).unwrap();
+    std::fs::write(
+        f.sidecar_path(),
+        "version = 1\n\n[\"left-pad@1.3.0\"]\nurl = \"u\"\nthis is not toml [[[\n",
+    )
+    .unwrap();
+
+    let out = f.cmd().args(["vendor", "--check"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("pudu.lock"), "{stderr}");
+    assert!(
+        stderr.contains("TOML parse error"),
+        "the underlying cause must reach the user:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("line 5"),
+        "including where in the file it is:\n{stderr}"
+    );
 }
 
 #[test]
@@ -272,6 +309,7 @@ fn a_tarball_whose_bytes_fail_the_integrity_aborts_naming_the_package() {
     let server = MockServer::start();
     let served = tarball(&[("package.json", r#"{"name":"left-pad"}"#)]);
     let other = tarball(&[("package.json", r#"{"name":"left-pad","version":"9"}"#)]);
+    let served_copy = served.clone();
     server.mock(|when, then| {
         when.method(GET).path("/left-pad/-/left-pad-1.3.0.tgz");
         then.status(200).body(served);
@@ -312,6 +350,25 @@ fn a_tarball_whose_bytes_fail_the_integrity_aborts_naming_the_package() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("left-pad@1.3.0"), "{stderr}");
     assert!(stderr.contains("integrity"), "{stderr}");
+    // Exit criterion 2: the package, the URL, and *both* hashes. A user
+    // seeing this needs to know which host served the bytes and what hash
+    // actually arrived, to tell a mirror misconfiguration from a republished
+    // tarball from an attack.
+    assert!(
+        stderr.contains(&format!(
+            "{}/left-pad/-/left-pad-1.3.0.tgz",
+            server.base_url()
+        )),
+        "the error must name the URL it fetched:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&integrity_of(&other)),
+        "the error must name the expected hash:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&integrity_of(&served_copy)),
+        "the error must name the hash that actually arrived:\n{stderr}"
+    );
     assert!(
         !Path::new(&dir.path().join("third-party/js/pudu.lock")).exists(),
         "a failed run must not write a sidecar"

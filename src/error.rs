@@ -445,11 +445,13 @@ pub enum VendorError {
     )]
     UnsupportedResolution { packages: Vec<String> },
 
-    #[error("{key}: tarball does not match the integrity recorded in pnpm-lock.yaml")]
+    #[error(
+        "{key}: tarball does not match the integrity recorded in pnpm-lock.yaml\n  url:      {url}\n  expected: {expected}\n  actual:   {actual}"
+    )]
     #[diagnostic(
         code(pudu::vendor::integrity_mismatch),
         help(
-            "the registry served different bytes than pnpm recorded. Do not ignore this: it means the tarball changed after your lockfile was written."
+            "the registry served different bytes than pnpm recorded. Do not ignore this: it means the tarball changed after your lockfile was written. Compare the two hashes and the URL above to tell a misconfigured mirror from a republished tarball from an attack."
         )
     )]
     IntegrityMismatch {
@@ -490,7 +492,7 @@ pub enum VendorError {
         url: String,
     },
 
-    #[error("cannot read {path}")]
+    #[error("cannot read {path}: {reason}")]
     #[diagnostic(
         code(pudu::vendor::sidecar_malformed),
         help("pudu.lock is generated; delete it and run `pudu vendor` to rebuild it")
@@ -504,7 +506,7 @@ pub enum VendorError {
     )]
     NoPlatformsConfigured,
 
-    #[error("{key}: not in the cache and --no-network was given")]
+    #[error("{key}: {url} is not in the cache and --no-network was given")]
     #[diagnostic(
         code(pudu::vendor::network_disabled),
         help("run `pudu vendor` once without --no-network to warm the cache")
