@@ -494,10 +494,10 @@ pub enum VendorError {
 
     #[error("cannot read {path}: {reason}")]
     #[diagnostic(
-        code(pudu::vendor::sidecar_malformed),
+        code(pudu::vendor::table_malformed),
         help("pudu.lock is generated; delete it and run `pudu vendor` to rebuild it")
     )]
-    SidecarMalformed { path: PathBuf, reason: String },
+    TableMalformed { path: PathBuf, reason: String },
 
     #[error("{key}: {url} is not in the cache and --no-network was given")]
     #[diagnostic(
@@ -577,7 +577,7 @@ impl VendorError {
             | VendorError::MissingPackageJson { .. }
             | VendorError::MalformedIntegrity { .. }
             | VendorError::BadDerivedUrl { .. }
-            | VendorError::SidecarMalformed { .. }
+            | VendorError::TableMalformed { .. }
             | VendorError::NetworkDisabled { .. } => ExitCode::InputInvalid,
         }
     }

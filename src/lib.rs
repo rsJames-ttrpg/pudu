@@ -8,7 +8,7 @@ pub mod config;
 pub mod error;
 pub mod fetch;
 pub mod lock;
+pub mod packages;
 pub mod platform;
 pub mod registry;
-pub mod sidecar;
 pub mod tarball;
