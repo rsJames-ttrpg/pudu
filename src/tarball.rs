@@ -168,7 +168,16 @@ fn read_archive(key: &str, bytes: &[u8]) -> Result<Archive, VendorError> {
         .map_err(|e| malformed(format!("cannot read tar entries: {e}")))?
     {
         let mut entry = entry.map_err(|e| malformed(format!("cannot read tar entry: {e}")))?;
-        let is_file = entry.header().entry_type().is_file();
+        let entry_type = entry.header().entry_type();
+        // Metadata entries carry a synthetic name that is not part of the
+        // archive's directory tree — `pax_global_header` is the common one,
+        // emitted by GNU tar's default pax format and by `git archive`. Skip
+        // them before the root check, or a perfectly valid archive is
+        // rejected for having "inconsistent root directories".
+        if !entry_type.is_file() && !entry_type.is_dir() {
+            continue;
+        }
+        let is_file = entry_type.is_file();
         let path = entry
             .path()
             .map_err(|e| malformed(format!("cannot read entry path: {e}")))?
@@ -522,6 +531,40 @@ mod tests {
             reason.contains("package") && reason.contains("other"),
             "the reason must name both roots it found: {reason}"
         );
+    }
+
+    #[test]
+    fn a_pax_global_header_does_not_poison_the_root_check() {
+        // GNU tar's default pax format and `git archive` both prepend a
+        // `pax_global_header` entry. It is metadata, not a member of the
+        // directory tree, so it must not be read as a second root — a
+        // private-registry tarball built that way is perfectly valid.
+        let mut ar = tar::Builder::new(Vec::new());
+        let mut gh = tar::Header::new_ustar();
+        let global = "52 comment=0000000000000000000000000000000000000000\n";
+        gh.set_size(global.len() as u64);
+        gh.set_entry_type(tar::EntryType::XGlobalHeader);
+        gh.set_mode(0o644);
+        gh.set_cksum();
+        ar.append_data(&mut gh, "pax_global_header", global.as_bytes())
+            .unwrap();
+        for (path, body) in [("package.json", r#"{"name":"p"}"#), ("index.js", "")] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            ar.append_data(&mut h, format!("package/{path}"), body.as_bytes())
+                .unwrap();
+        }
+        let tar_bytes = ar.into_inner().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&tar_bytes).unwrap();
+        let bytes = gz.finish().unwrap();
+        let i = integrity_of(&bytes);
+
+        let (v, _) = verify_and_inspect("p@1.0.0", "p", URL, &bytes, &i)
+            .unwrap_or_else(|e| panic!("a pax global header must not be a second root: {e}"));
+        assert_eq!(v.inspection.bin, BTreeMap::new());
     }
 
     #[test]
