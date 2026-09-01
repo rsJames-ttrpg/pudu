@@ -37,15 +37,18 @@ pub struct Entry {
     pub sha256: String,
     /// Compressed bytes.
     pub size: u64,
-    /// The archive's single root directory, no trailing slash — what a build
-    /// rule passes to `http_archive(strip_prefix = …)`.
+    /// The archive's single root directory, no trailing slash.
     ///
     /// Required, because every valid archive has exactly one. Usually
     /// `package`, but `@types/*` tarballs nest under their own display name
     /// (`estree`, `node v22.20`), so it cannot be assumed. Recording it is
-    /// what keeps a later build-rule pass offline: the package table is its only
+    /// what keeps the build-rule pass offline: the package table is its only
     /// input, and re-deriving the root would mean re-downloading every
     /// tarball.
+    ///
+    /// **Not** for `http_archive(strip_prefix = …)`: the prelude interpolates
+    /// that into a shell command unquoted, so a root containing a space
+    /// breaks the build. S4 emits it as the `[root]` sub-target instead.
     pub root: String,
     pub bin: BTreeMap<String, String>,
     pub has_install_script: bool,

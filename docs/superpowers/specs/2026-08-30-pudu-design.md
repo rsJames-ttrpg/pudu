@@ -393,18 +393,27 @@ def npm_package(name, url, sha256, size, root, bin = {}, visibility = None):
         sha256 = sha256,
         size_bytes = size,
         type = "tar.gz",
-        strip_prefix = root,          # NOT always "package" — see below
-        sub_targets = bin.values(),   # expose each bin script as //...:pkg[bin/foo]
+        sub_targets = {"root": [root], **{p: [p] for p in bin.values()}},
         visibility = visibility or ["PUBLIC"],
     )
 ```
 
-`root` is **not** a constant. An earlier revision of this file hard-coded
-`strip_prefix = "package"` with the comment "npm tarballs universally nest
-under package/". That is false: DefinitelyTyped's types-publisher nests each
-`@types/*` package under its own display name, so `@types/estree` unpacks to
-`estree/` and `@types/node@22.20.x` to `node v22.20/`. The 400-package fixture
-has 18 such entries.
+`root` cannot be passed as `strip_prefix`. The prelude joins the tar command
+with spaces and writes it into a `/bin/sh` script without quoting, so
+`node v22.20` reaches tar as two arguments and the build fails with
+`tar: node: Not found in archive`. Since `root` comes from a package's own
+tarball, that is also unquoted third-party text reaching a shell. The
+archive is left un-stripped and the root is exposed as the `[root]`
+sub-target, which is a pure artifact projection.
+
+`root` is still **not** a constant, and recording it still matters even though
+it no longer feeds `strip_prefix`: an earlier revision of this file hard-coded
+`"package"` with the comment "npm tarballs universally nest under package/".
+That is false: DefinitelyTyped's types-publisher nests each `@types/*`
+package under its own display name, so `@types/estree` unpacks to `estree/`
+and `@types/node@22.20.x` to `node v22.20/`. The 400-package fixture has 18
+such entries, and it is exactly those entries — a root containing a space —
+that ruled out `strip_prefix` in the first place.
 
 The value comes from the `root` field S3 records for every package in
 `packages.toml` (S3 design §6), computed once from the archive itself at vendor
@@ -458,7 +467,22 @@ def node_modules_tree(name, srcs_by_platform, visibility = None):
         }),
         visibility = visibility or ["PUBLIC"],
     )
-``` Node's own resolution algorithm then works unmodified, because the layout **is** pnpm's — a module inside `.pnpm/express@4.19.2/node_modules/express` resolves its siblings by walking up one directory, exactly as under a real `pnpm install`. Scoped names use pnpm's `+` convention (`.pnpm/@scope+name@1.0.0/`).
+```
+
+Node does **not** resolve through this layout as written. `filegroup(copy = False)`
+calls `ctx.actions.symlinked_dir`, so every store leaf is a symlink to its
+extraction directory; Node resolves `node_modules` symlinks to their real
+paths, which land outside the tree, and sibling lookup escapes. `copy = True`
+fails too, by flattening the symlink pnpm's isolation depends on. The real
+pnpm shape — real directories at `.pnpm/<key>/node_modules/<pkg>`, relative
+symlinks within the tree — resolves correctly but needs copies and intra-tree
+symlinks from a single action, which no `filegroup` mode provides. The store
+layout is therefore a rule pudu writes, designed in S5 where `node_binary`
+and `buck2 run` can prove it. See the S4 design, §1.4.
+
+The `filegroup` example above illustrates the *shape* of the store layout
+only — scoped names using pnpm's `+` convention (`.pnpm/@scope+name@1.0.0/`)
+— not a working rule; the working rule is S5's.
 
 `node_binary` and `node_test` are thin: a generated launcher script plus `sh_binary`, taking the tree as a resource and the Node executable from a toolchain.
 
@@ -641,9 +665,9 @@ v1 fixtures:
 - **~~Lockfile v9 field inventory needs verification.~~ Resolved 2026-08-31.** The [v9 field survey](../research/2026-08-31-pnpm-lock-v9-field-survey.md) confirms `requiresBuild` is absent from all 18 v9 lockfiles examined, so §4's mandatory vendor pass stands. `hasBin` did survive into v9 as a bare boolean — not a bin map, but a useful cross-check against the vendor pass.
 - **pnpm lockfile format churn.** v9 has been stable across pnpm 9 and 10, but pnpm moves fast. Mitigation: reject unknown `lockfileVersion` loudly rather than parsing optimistically; CI tests against the min-supported and latest pnpm.
 - **Dependency cycles are universal, and constrain how the store may be split.** Every real lockfile surveyed contains cycles (`@babel/core` ↔ `@babel/helper-module-transforms`, `eslint` ↔ `@eslint-community/eslint-utils`). They are harmless here because the store is one `filegroup` whose cycle lives in symlink data, not in the Buck target graph. But S4 must not decompose the store into one target per package depending on its dependencies' targets — that reintroduces the cycle as a Buck target cycle. A split for scale must follow tarball-extraction lines, which are acyclic.
-- **`filegroup` scale.** A large workspace's store graph could produce a dict with tens of thousands of entries in one `filegroup`. Unknown whether Buck2's `symlinked_dir` handles that comfortably. S4 must measure on a realistic lockfile; if it degrades, the fallback is per-package `filegroup`s composed into a tree.
-- **`.bin` sub-target extraction.** `http_archive` exposes `sub_targets`, but referencing a single file inside the extracted archive for a `.bin` symlink needs confirming — the design assumes `//third-party/js:pkg[bin/foo]` works. S4 validates; fallback is a small genrule per bin entry.
-- **Node's symlink realpath behaviour.** Node resolves `node_modules` symlinks to their real paths by default (`--preserve-symlinks` off). Under Buck, the "real path" is buck-out. pnpm relies on the same behaviour and works, so this should hold, but S4's e2e test is the actual proof.
+- **`filegroup` scale.** A large workspace's store graph could produce a dict with tens of thousands of entries in one `filegroup`. Unknown whether Buck2's `symlinked_dir` handles that comfortably. Retargeted to S5: `node_modules_tree` is the rule that would emit such a dict, and S4 no longer emits it. Measure when S5 builds the tree; if it degrades, the fallback is per-package `filegroup`s composed into a tree.
+- **`.bin` sub-target extraction — resolved, confirmed.** `http_archive`'s `sub_targets` in dict form works for referencing a single file inside the extracted archive: `//third-party/js:pkg[bin/foo]` resolves. No genrule fallback is needed.
+- **Node's symlink realpath behaviour — resolved, refuted.** The design assumed Node resolves through a `filegroup(copy = False)` store layout unmodified, because "the layout is pnpm's." It does not: `symlinked_dir` makes every store leaf a symlink, Node realpaths `node_modules` symlinks to their targets by default, and sibling lookup escapes the tree. See the S4 design, §1.4, for the evidence.
 - **~~Bundled dependencies.~~ Resolved 2026-08-31.** pnpm already omits bundled names from the snapshot graph — the bundled package's snapshot carries no `dependencies` at all — so they never become edges and there is no double-install risk. Pudu parses the field and ignores it.
 - **Registry URL derivation is a heuristic.** `https://<registry>/<name>/-/<basename>-<version>.tgz` holds for npmjs.org and most mirrors, but private registries (Artifactory, Verdaccio) vary. Mitigation: `packages.toml` records the resolved URL, so a wrong derivation fails loudly at vendor time and `prefer_tarball` overrides it.
 - **Registry repo location undecided.** `github.com/<user>/pudu-fixups` is a placeholder; the real location is a launch-time decision and blocks nothing before the first public release.

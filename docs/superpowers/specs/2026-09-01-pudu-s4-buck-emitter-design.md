@@ -435,15 +435,32 @@ A gated job, alongside `vendor-oracle` and `platform-fuzz`:
   buck2-build:
     name: buck2 build (generated output)
     steps:
-      - install buck2 at a pinned release
-      - clone the prelude at a pinned commit sha
+      - install buck2 at the facebook/buck2 release tag 2026-08-22
+      - vendor the prelude from the same tag (a plain directory, not a submodule)
       - cargo run -- buckify   (in the fixture)
       - buck2 build //third-party/js/...
 ```
 
-The prelude is pinned by sha. Had §1.1 been a prelude regression rather than a
-design error, this job is what would have caught it; unpinned, it is what would
-have broken mysteriously.
+buck2 and its prelude are pinned by the single `facebook/buck2` release tag
+`2026-08-22` — one tag for both, not a binary version paired with a
+separately-tracked prelude commit — so the binary and the prelude cannot
+drift apart. `prelude/` is vendored into the fixture as a plain directory at
+CI time (sparse-checkout of that tag), not a git submodule.
+
+This job earned its keep on its first run: `buck::generate` was passing the
+*absolute* `third_party_dir` into the `load()` label, so every generated
+`BUCK` carried `load("///tmp/.../third-party/js:pudu.bzl", ...)` — a path
+buck2's parser rejects outright. The bug survived Tasks 3 and 4 because
+`emit.rs`'s unit test supplies a relative label by hand, and no integration
+test read the load line back out of the CLI's own output; only a real `buck2
+build` against pudu's actual output caught it. Fixed by rejecting an absolute
+`third_party_dir` in `buck::generate` with a typed error
+(`BuckError::AbsoluteThirdPartyDir`, exit code 3 — a label is cell-relative
+and an absolute path cannot be expressed as one at all), with explicit
+assertions on the load line in `tests/buckify.rs` and an insta snapshot. Had
+§1.1 been a prelude regression rather than a design error, this job is what
+would have caught that too; unpinned, either failure mode is what would have
+broken mysteriously.
 
 ---
 
@@ -456,7 +473,9 @@ have broken mysteriously.
 4. `//third-party/js:<pkg>[root]` and `[bin/<name>]` resolve to the package
    directory and the bin script respectively.
 5. `buckify` on the 328-package lockfile succeeds, is deterministic, and its
-   size and wall-clock are recorded.
+   size and wall-clock are recorded. Measured: 322 packages emitted, 88263
+   bytes of `BUCK`, in ~58–61 ms (`cargo test --test buckify_scale --
+   --ignored --nocapture`).
 6. `buckify --check` exits 5 on drift and 0 on agreement.
 7. A missing or stale `packages.toml` fails before any file is written.
 8. Sort order is documented and tested.

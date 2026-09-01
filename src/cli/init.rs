@@ -508,10 +508,12 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
     println!("wrote {}", config_path.display());
 
     // third-party/js skeleton. `--force` governs pudu.toml and the
-    // toolchains/BUCK managed block only (spec, commit f4c5b0c): files under
-    // third-party/js/ are user-owned once they exist — pudu's own generated
-    // toolchains.bzl says "Safe to edit" — so they are never overwritten,
-    // `--force` or not.
+    // toolchains/BUCK managed block only (spec, commit f4c5b0c). The
+    // user-owned files here — toolchains.bzl, .gitignore, fixups/ — are never
+    // overwritten, `--force` or not. The three files `pudu buckify`
+    // generates (BUCK, pudu.bzl, config/BUCK) are pudu's and are rewritten on
+    // every buckify; they carry an `@generated` banner saying so. `init`
+    // seeds BUCK with a placeholder that the first buckify replaces.
     let tp = root.join(&third_party_dir);
     std::fs::create_dir_all(tp.join("fixups"))
         .with_context(|| format!("cannot create {}", tp.join("fixups").display()))?;

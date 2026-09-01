@@ -14,27 +14,28 @@ pudu is the world's smallest deer. reindeer does Cargo, muntjac does uv, pudu do
 
 ## Status
 
-**S0–S3 have shipped: everything up to, but not including, emitting BUCK.**
+**S0–S4 have shipped: pudu emits BUCK for the package layer, single-platform.**
 
 - **S0 — scaffolding.** `pudu init` detects a pnpm workspace, derives a platform matrix from `supportedArchitectures`, and writes `pudu.toml`, a `third-party/js/` skeleton, and a marker-delimited Node toolchain into `toolchains/BUCK`. `pudu config check` validates `pudu.toml`, in human or JSON output.
 - **S1 — lockfile.** `pnpm-lock.yaml` v9 is parsed in full and turned into the instance graph, one node per snapshot key, with peer-dependency instances kept distinct.
 - **S2 — platforms.** Every node is pruned per configured platform using npm's `os` / `cpu` / `libc` fields, reproducing pnpm's own matching rules.
 - **S3 — vendor.** `pudu vendor` downloads the tarball for every package surviving on at least one configured platform, verifies each against the sha512 `pnpm-lock.yaml` records, inspects the archive for its bin map and install-script triggers, and writes a committed, deterministic `<third_party_dir>/packages.toml`. `pudu vendor --check` is an offline CI gate that exits 5 when the package table is stale.
+- **S4 — first BUCK emitter.** `pudu buckify` reads `packages.toml` and writes `BUCK` (one `npm_package` per entry), `pudu.bzl` (the macro and its `http_archive` + `[root]`/`[bin/*]` sub-targets), and `config/BUCK`. `pudu buckify --check` is an offline CI gate that exits 5 naming the first file that has drifted. The store layout — `node_modules_tree`, multi-platform `select()`, and `node_binary` — is S5.
 
-**Not yet.** pudu cannot emit BUCK: `buckify` (S4), `fixups` (S7/S8), `audit`, and `unused` are listed in `--help` and exit 2 with the stage that will implement them. S4 (emitting build rules from `packages.toml`) is next. See the [design spec](docs/superpowers/specs/2026-08-30-pudu-design.md) and [roadmap](docs/superpowers/specs/2026-08-30-pudu-roadmap.md).
+**Not yet.** `fixups` (S7/S8), `audit`, and `unused` are listed in `--help` and exit 2 with the stage that will implement them. S5 (multi-platform emission and the store layout) is next. See the [design spec](docs/superpowers/specs/2026-08-30-pudu-design.md) and [roadmap](docs/superpowers/specs/2026-08-30-pudu-roadmap.md).
 
-## Planned quickstart
+## Quickstart
 
 ```sh
 cargo install pudu
 cd my-pnpm-repo           # contains pnpm-lock.yaml
 pudu init                 # writes pudu.toml + third-party/js/ skeleton
-pudu vendor               # fetch tarballs, verify integrity, write packages.toml (works today)
-pudu buckify              # emit BUCK + pudu.bzl + config/BUCK (S4)
-buck2 run //packages/server:server
+pudu vendor               # fetch tarballs, verify integrity, write packages.toml
+pudu buckify              # emit BUCK + pudu.bzl + config/BUCK
+buck2 build //third-party/js/...
 ```
 
-Re-run `pudu vendor && pudu buckify` whenever `pnpm-lock.yaml` changes.
+Re-run `pudu vendor && pudu buckify` whenever `pnpm-lock.yaml` changes. `buck2 run //packages/server:server` needs S5's `node_binary`.
 
 ## How it works
 

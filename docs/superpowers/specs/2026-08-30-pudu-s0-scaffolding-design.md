@@ -193,7 +193,7 @@ Same shape, with `lockfile_path = "TODO: path to your pnpm-lock.yaml"`, the defa
 ### Overwrite handling
 
 - `pudu.toml` exists → `error: pudu.toml already exists; pass --force to overwrite`, exit 2.
-- `third-party/js/` exists and is non-empty → warn per file that already exists and leave that file alone, while still creating the ones that are missing, and still write `pudu.toml`. **`--force` does not change this.** (Amended to match the implementation: filling in missing files keeps `init` idempotent and lets it recover a partial scaffold, while an existing file is still never overwritten.)
+- `third-party/js/` exists and is non-empty → warn per file that already exists and leave that file alone, while still creating the ones that are missing, and still write `pudu.toml`. **`--force` does not change this.** (Amended to match the implementation: filling in missing files keeps `init` idempotent and lets it recover a partial scaffold, while an existing file is still never overwritten.) (Narrowed by S4: this rule governs `init`'s own writes only. `pudu buckify` — introduced in S4 — rewrites `BUCK`, `pudu.bzl` and `config/BUCK` on every run regardless of `--force`; they carry an `@generated` banner saying so and are not "user-owned" in the sense this section means. `toolchains.bzl`, `.gitignore` and `fixups/` remain the user-owned files this rule protects.)
 - `toolchains/BUCK` → governed by the table in §3.3, which `--force` does affect.
 - `--force` bypasses only the `pudu.toml` check.
 
