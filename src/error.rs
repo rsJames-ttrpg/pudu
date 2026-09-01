@@ -537,6 +537,17 @@ pub enum VendorError {
         help("set PUDU_CACHE_DIR to a writable directory")
     )]
     CacheUnavailable,
+
+    #[error("cannot write to the cache at {path}")]
+    #[diagnostic(
+        code(pudu::vendor::cache_write_failed),
+        help("set PUDU_CACHE_DIR to a writable directory")
+    )]
+    CacheWriteFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Help text for an HTTP failure. 401 and 403 get their own wording because
@@ -554,11 +565,23 @@ impl VendorError {
     pub fn exit_code(&self) -> ExitCode {
         match self {
             VendorError::Stale { .. } => ExitCode::Stale,
-            // A registry that is down or refusing is not the user's input
-            // being invalid, so it stays unclassified rather than claiming
-            // pudu.toml or the lockfile is at fault.
-            VendorError::HttpStatus { .. } | VendorError::Transport { .. } => ExitCode::Internal,
-            _ => ExitCode::InputInvalid,
+            // A registry that is down or refusing, or a cache write failure,
+            // is not the user's input being invalid, so these stay
+            // unclassified rather than claiming pudu.toml or the lockfile is
+            // at fault.
+            VendorError::HttpStatus { .. }
+            | VendorError::Transport { .. }
+            | VendorError::CacheWriteFailed { .. } => ExitCode::Internal,
+            VendorError::UnsupportedResolution { .. }
+            | VendorError::IntegrityMismatch { .. }
+            | VendorError::MalformedTarball { .. }
+            | VendorError::MissingPackageJson { .. }
+            | VendorError::MalformedIntegrity { .. }
+            | VendorError::BadDerivedUrl { .. }
+            | VendorError::SidecarMalformed { .. }
+            | VendorError::NoPlatformsConfigured
+            | VendorError::NetworkDisabled { .. }
+            | VendorError::CacheUnavailable => ExitCode::InputInvalid,
         }
     }
 }
