@@ -185,6 +185,14 @@ fn a_table_from_a_future_pudu_is_regenerated_not_rejected() {
     assert_ne!(stale, original, "the replacement must actually apply");
     std::fs::write(f.table_path(), &stale).unwrap();
 
+    let out = f.cmd().args(["vendor", "--check"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("packages.toml says version 2; this pudu writes version 1"),
+        "{stderr}"
+    );
+
     f.cmd().arg("vendor").assert().success();
 
     let regenerated = f.table();
@@ -379,7 +387,10 @@ fn a_corrupt_table_reports_the_underlying_parse_error() {
     let out = f.cmd().args(["vendor", "--check"]).output().unwrap();
     assert_eq!(out.status.code(), Some(3));
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("packages.toml"), "{stderr}");
+    assert!(
+        stderr.contains(&f.table_path().display().to_string()),
+        "{stderr}"
+    );
     assert!(
         stderr.contains("TOML parse error"),
         "the underlying cause must reach the user:\n{stderr}"

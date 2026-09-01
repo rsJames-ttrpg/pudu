@@ -341,7 +341,7 @@ crate normally. Keys are always quoted; the writer escapes `"` and `\`.
 The file is written to a temporary file and renamed, so an interrupted run
 leaves the previous package table intact rather than a half-written one.
 
-Renamed from `pudu.lock` in S3.5 — see `docs/superpowers/specs/2026-09-01-pudu-s3.5-package-table-design.md`.
+Renamed from `pudu.lock` in S3.5, which also reset its format version from 2 to 1 — see `docs/superpowers/specs/2026-09-01-pudu-s3.5-package-table-design.md`.
 
 ---
 

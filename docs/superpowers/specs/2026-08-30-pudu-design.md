@@ -583,7 +583,7 @@ src/
 │   └── graph.rs            # instance graph construction
 ├── platform.rs             # os/cpu/libc model; npm field matching; constraint mapping
 ├── registry.rs             # tarball URL derivation, scope overrides
-├── packages.rs              # packages.toml read/write
+├── packages.rs             # packages.toml read/write
 ├── tarball.rs              # fetch, sha512 verify, package.json inspection
 ├── scripts.rs              # lifecycle-script gate
 ├── fixup/
