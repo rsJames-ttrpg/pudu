@@ -34,8 +34,12 @@ pub fn run(check: bool) -> Result<()> {
     let table_path = third_party_dir.join("packages.toml");
     let loaded = packages::load(&table_path)?;
 
-    // Stale or missing table fails here, before a single file is written, so
-    // a half-generated tree is not a reachable state.
+    // Stale or missing table fails here, before a single file is written.
+    // That rules out validation failures leaving a half-generated tree, but
+    // not a mid-write I/O failure: `Generated::write` renames each file into
+    // place only after every temp file for this call has been created, so a
+    // failure creating or writing one of them still leaves every target path
+    // untouched — see its doc comment for the one remaining, narrower risk.
     let differences = packages::staleness(&plan.expected, &loaded);
     if !differences.is_empty() {
         for d in &differences {
@@ -64,10 +68,11 @@ pub fn run(check: bool) -> Result<()> {
     // a filesystem path — `third_party_dir` above is absolute (joined with
     // cwd) for reading and writing files, so `config.third_party_dir` (the
     // relative path straight from pudu.toml) is what goes into the label
-    // instead. `buck::generate` itself refuses an absolute
-    // `third_party_dir` with `BuckError::AbsoluteThirdPartyDir` — config.rs
-    // permits one (nothing there requires relative), so the guarantee that
-    // a `load("///...")` is never emitted lives here, not in validation.
+    // instead. `buck::generate` itself refuses anything that is not a
+    // normalized relative path with `BuckError::UnusableThirdPartyDir` —
+    // config.rs permits any of those (nothing there requires relative or
+    // normalized), so the guarantee that an unparseable label is never
+    // emitted lives here, not in validation.
     let generated = buck::generate(entries, &config.platforms, &config.third_party_dir)?;
 
     if check {

@@ -10,6 +10,17 @@ expression: "std::fs::read_to_string(tp.join(\"config/BUCK\")).unwrap()"
 config_setting(
     name = "linux-x64-gnu",
     constraint_values = [
+        "prelude//abi/constraints:gnu",
+        "prelude//cpu/constraints:x86_64",
+        "prelude//os/constraints:linux",
+    ],
+    visibility = ["PUBLIC"],
+)
+
+config_setting(
+    name = "linux-x64-musl",
+    constraint_values = [
+        "prelude//abi/constraints:musl",
         "prelude//cpu/constraints:x86_64",
         "prelude//os/constraints:linux",
     ],

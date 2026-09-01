@@ -606,14 +606,30 @@ pub enum BuckError {
     )]
     UnrepresentableBinName { package: String, name: String },
 
-    #[error("third_party_dir must be relative to the repository root, but is `{}`", path.display())]
+    #[error("third_party_dir `{}` cannot become a Buck label: {reason}", path.display())]
     #[diagnostic(
-        code(pudu::buckify::absolute_third_party_dir),
+        code(pudu::buckify::unusable_third_party_dir),
         help(
-            "the generated BUCK loads `//<third_party_dir>:pudu.bzl`, and a Buck label is a cell-relative path. An absolute path cannot be expressed as one. Set `third_party_dir` in pudu.toml to a path relative to the repository root."
+            "third_party_dir becomes the Buck label `//<third_party_dir>:pudu.bzl`. A Buck label must be a normalized path relative to the repository root — no leading `/`, no `.` or `..` components, and no empty components from a leading, trailing or doubled `/`. Set `third_party_dir` in pudu.toml accordingly."
         )
     )]
-    AbsoluteThirdPartyDir { path: PathBuf },
+    UnusableThirdPartyDir { path: PathBuf, reason: String },
+
+    #[error("cannot write {path}")]
+    #[diagnostic(code(pudu::buckify::write_failed))]
+    WriteFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("cannot read {path}")]
+    #[diagnostic(code(pudu::buckify::read_failed))]
+    ReadFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl BuckError {
@@ -627,7 +643,10 @@ impl BuckError {
             BuckError::UnrepresentableBinName { .. } => ExitCode::InputInvalid,
             // The offending value came from pudu.toml, not from the command
             // line, so this is input-invalid too.
-            BuckError::AbsoluteThirdPartyDir { .. } => ExitCode::InputInvalid,
+            BuckError::UnusableThirdPartyDir { .. } => ExitCode::InputInvalid,
+            // An I/O failure mid-write or mid-read is unexpected, like any
+            // other I/O failure elsewhere in pudu.
+            BuckError::WriteFailed { .. } | BuckError::ReadFailed { .. } => ExitCode::Internal,
         }
     }
 }

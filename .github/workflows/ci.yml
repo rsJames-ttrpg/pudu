@@ -107,6 +107,11 @@ jobs:
           cp -r /tmp/buck2src/prelude tests/fixtures/buck/01-pure-js/prelude
       - name: pudu buckify
         run: cargo run -- -C tests/fixtures/buck/01-pure-js buckify
+      - name: pudu buckify --check
+        # Generated files are gitignored, so nothing else in CI proves the
+        # emitter agrees with itself across runs. A nondeterministic emitter
+        # must fail this job.
+        run: cargo run -- -C tests/fixtures/buck/01-pure-js buckify --check
       - name: buck2 build
         run: buck2 build //third-party/js/...
         working-directory: tests/fixtures/buck/01-pure-js

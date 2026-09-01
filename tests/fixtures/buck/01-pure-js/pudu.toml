@@ -6,5 +6,10 @@ os = "linux"
 cpu = "x64"
 libc = "glibc"
 
+[platforms.linux-x64-musl]
+os = "linux"
+cpu = "x64"
+libc = "musl"
+
 [registry]
 default = "https://registry.npmjs.org"

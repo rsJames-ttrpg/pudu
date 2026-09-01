@@ -1,9 +1,13 @@
 //! `config/BUCK` — one `config_setting` per configured platform.
 //!
-//! A renderer over S2's `constraint_labels`, which already returns sorted
-//! labels and already implements design §7's conditional-abi rule. No
-//! platform logic is written here; adding any would put a second copy of that
-//! rule where the first one could not see it.
+//! A renderer over S2's `constraint_labels`, which already implements design
+//! §7's conditional-abi rule and already returns labels in the order the
+//! output must have them: sorted for a generated platform, and preserved
+//! verbatim — in the user's own order — for a `constraints = [...]`
+//! override, since that escape hatch's determinism comes from the input's
+//! own stable order rather than from any sorting here. No platform logic is
+//! written in this file; adding any would put a second copy of that rule
+//! where the first one could not see it.
 
 use std::collections::BTreeMap;
 
