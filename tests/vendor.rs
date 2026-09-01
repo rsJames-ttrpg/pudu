@@ -142,6 +142,11 @@ fn vendor_writes_a_sidecar_covering_every_package() {
         2,
         "every entry records a sha256:\n{text}"
     );
+    assert_eq!(
+        text.matches(r#"root = "package""#).count(),
+        2,
+        "every entry records the archive root a build rule will strip:\n{text}"
+    );
 }
 
 #[test]

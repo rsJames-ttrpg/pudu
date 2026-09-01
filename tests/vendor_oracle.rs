@@ -40,6 +40,7 @@ struct OracleEntry {
 #[derive(serde::Deserialize)]
 struct SidecarEntry {
     url: String,
+    root: String,
     #[serde(default)]
     bin: BTreeMap<String, String>,
     #[serde(default)]
@@ -109,6 +110,9 @@ fn the_vendor_pass_agrees_with_the_registry_on_every_package() {
 
     let mut mismatches: Vec<String> = Vec::new();
     for (key, got) in &sidecar.entries {
+        if got.root.is_empty() {
+            mismatches.push(format!("{key}: recorded no archive root"));
+        }
         let Some(want) = oracle.get(key) else {
             mismatches.push(format!("{key}: vendored but absent from the oracle"));
             continue;
@@ -167,6 +171,15 @@ fn the_vendor_pass_agrees_with_the_registry_on_every_package() {
             .map(|e| e.has_install_script),
         Some(false),
         "fsevents ships a prebuilt binary in its tarball; no install script or binding.gyp is actually present, despite the registry manifest claiming otherwise"
+    );
+    // `@types/*` tarballs are published by DefinitelyTyped's types-publisher
+    // and nest under the package's display name, not `package/`. The sidecar
+    // must record what the archive actually says, since it is the only input
+    // a later build-rule pass has.
+    assert_eq!(
+        sidecar.entries.get("@types/estree@1.0.9").map(|e| &e.root),
+        Some(&"estree".to_string()),
+        "a non-`package` root must be recorded verbatim"
     );
     assert_eq!(
         sidecar

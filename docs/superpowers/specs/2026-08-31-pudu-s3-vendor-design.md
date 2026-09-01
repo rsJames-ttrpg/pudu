@@ -257,13 +257,22 @@ url = "https://registry.npmjs.org/@babel/parser/-/parser-7.29.8.tgz"
 sha512 = "sha512-…"
 sha256 = "…"
 size = 1948123
+root = "package"
 bin = { parser = "bin/babel-parser.js" }
 
-["fsevents@2.3.3"]
-url = "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz"
+["@types/estree@1.0.9"]
+url = "https://registry.npmjs.org/@types/estree/-/estree-1.0.9.tgz"
 sha512 = "sha512-…"
 sha256 = "…"
-size = 88705
+size = 16145
+root = "estree"
+
+["esbuild@0.25.12"]
+url = "https://registry.npmjs.org/esbuild/-/esbuild-0.25.12.tgz"
+sha512 = "sha512-…"
+sha256 = "…"
+size = 129712
+root = "package"
 has_install_script = true
 ```
 
@@ -274,6 +283,19 @@ dependencies, so one entry serves every peer instance.
 `sha256` is lowercase hex, which is the form `http_archive` expects. `bin` is
 omitted when empty and `has_install_script` when false — the common
 case is a package with neither, and 373 of 400 fixture packages have no bin.
+
+`root` is the archive's single root directory (§5), with no trailing slash:
+what design §8's `http_archive` passes to `strip_prefix`. It is **required**,
+never defaulted — every valid archive has exactly one, and it is `package` for
+most but not all of them (18 `@types/*` entries in the fixture nest under
+their own display name). It is recorded rather than recomputed because the
+sidecar is the only offline input the build-rule pass has; deriving the root
+there would mean re-downloading and re-inspecting every tarball, which is the
+one thing committing the sidecar exists to avoid.
+
+`--check` forms no expectation for `root`, because it forms none for anything
+the bytes decide. A root that changed did so because the tarball changed,
+which the `sha512` comparison already catches.
 
 **Rendering is by hand, not via `toml::to_string`.** Byte-identical output is
 an exit criterion, and hand-rendering makes the format the spec rather than a

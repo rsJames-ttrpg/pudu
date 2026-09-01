@@ -28,6 +28,16 @@ pub struct Entry {
     pub sha256: String,
     /// Compressed bytes.
     pub size: u64,
+    /// The archive's single root directory, no trailing slash — what a build
+    /// rule passes to `http_archive(strip_prefix = …)`.
+    ///
+    /// Required, because every valid archive has exactly one. Usually
+    /// `package`, but `@types/*` tarballs nest under their own display name
+    /// (`estree`, `node v22.20`), so it cannot be assumed. Recording it is
+    /// what keeps a later build-rule pass offline: the sidecar is its only
+    /// input, and re-deriving the root would mean re-downloading every
+    /// tarball.
+    pub root: String,
     pub bin: BTreeMap<String, String>,
     pub has_install_script: bool,
 }
@@ -48,6 +58,7 @@ impl Sidecar {
             out.push_str(&format!("sha512 = {}\n", quote(&e.sha512)));
             out.push_str(&format!("sha256 = {}\n", quote(&e.sha256)));
             out.push_str(&format!("size = {}\n", e.size));
+            out.push_str(&format!("root = {}\n", quote(&e.root)));
             if !e.bin.is_empty() {
                 let pairs: Vec<String> = e
                     .bin
@@ -127,6 +138,7 @@ struct RawEntry {
     sha512: String,
     sha256: String,
     size: u64,
+    root: String,
     #[serde(default)]
     bin: BTreeMap<String, String>,
     #[serde(default)]
@@ -171,6 +183,7 @@ pub fn load(path: &Path) -> Result<Loaded, VendorError> {
                         sha512: e.sha512,
                         sha256: e.sha256,
                         size: e.size,
+                        root: e.root,
                         bin: e.bin,
                         has_install_script: e.has_install_script,
                     },
@@ -181,6 +194,12 @@ pub fn load(path: &Path) -> Result<Loaded, VendorError> {
 }
 
 /// What `vendor` expects a sidecar entry to say, computed offline.
+///
+/// Deliberately only the two fields the lockfile and `pudu.toml` can answer
+/// without touching a tarball. `root`, `sha256`, `size`, and `bin` are all
+/// properties of the bytes, so `--check` cannot form an expectation for them
+/// and there is no `RootChanged` difference: a root that changed did so
+/// because the tarball did, which the `sha512` already catches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expected {
     pub url: String,
@@ -285,6 +304,7 @@ mod tests {
             sha512: "sha512-AAAA".to_string(),
             sha256: "ff00".to_string(),
             size: 42,
+            root: "package".to_string(),
             bin: BTreeMap::new(),
             has_install_script: false,
         }
@@ -390,6 +410,47 @@ mod tests {
     }
 
     #[test]
+    fn a_root_that_is_not_package_round_trips_through_render_and_load() {
+        // `@types/node@22.20.x` really does unpack to `node v22.20/` — a
+        // root that is neither `package` nor a bare TOML key, so this also
+        // exercises the quoting rules on a value with a space in it.
+        let mut e = entry("https://registry.npmjs.org/@types/node/-/node-22.20.0.tgz");
+        e.root = "node v22.20".to_string();
+        let original = sidecar(&[("@types/node@22.20.0", e)]);
+        let text = original.render();
+        assert!(
+            text.contains(r#"root = "node v22.20""#),
+            "the archive's real root must be recorded verbatim:\n{text}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pudu.lock");
+        std::fs::write(&path, &text).unwrap();
+        let Loaded::Present(parsed) = load(&path).unwrap() else {
+            panic!("expected a parsed sidecar");
+        };
+        assert_eq!(parsed, original);
+        assert_eq!(parsed.entries["@types/node@22.20.0"].root, "node v22.20");
+    }
+
+    #[test]
+    fn an_entry_with_no_root_is_an_error() {
+        // `root` is required, not defaulted: an entry that omits it would
+        // otherwise silently read back as an empty strip_prefix.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pudu.lock");
+        std::fs::write(
+            &path,
+            "version = 1\n\n[\"a@1.0.0\"]\nurl = \"u\"\nsha512 = \"sha512-AAAA\"\nsha256 = \"ff00\"\nsize = 42\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            load(&path).unwrap_err(),
+            VendorError::SidecarMalformed { .. }
+        ));
+    }
+
+    #[test]
     fn a_missing_file_loads_as_absent() {
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
@@ -435,7 +496,7 @@ mod tests {
         let path = dir.path().join("pudu.lock");
         std::fs::write(
             &path,
-            "version = 1\n\n[\"a@1.0.0\"]\nurl = \"u\"\nsha512 = \"sha512-AAAA\"\nsha256 = \"ff00\"\nsize = 42\nmystery = \"x\"\n",
+            "version = 1\n\n[\"a@1.0.0\"]\nurl = \"u\"\nsha512 = \"sha512-AAAA\"\nsha256 = \"ff00\"\nsize = 42\nroot = \"package\"\nmystery = \"x\"\n",
         )
         .unwrap();
         assert!(matches!(

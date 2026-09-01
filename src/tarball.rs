@@ -23,6 +23,15 @@ use crate::error::{VendorError, VendorWarning};
 /// What inspecting the archive yields.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Inspection {
+    /// The archive's single root directory, with no trailing slash — what a
+    /// build rule passes to `http_archive(strip_prefix = …)`.
+    ///
+    /// Usually `package`, but not always: every `@types/*` package nests
+    /// under its own display name instead (`estree`, `node v22.20`). It is
+    /// recorded rather than recomputed because the sidecar is the only
+    /// offline input a later build-rule pass has, and re-deriving it would
+    /// mean re-downloading every tarball.
+    pub root: String,
     pub bin: BTreeMap<String, String>,
     pub has_install_script: bool,
 }
@@ -57,6 +66,8 @@ pub(crate) struct Manifest {
 /// The archive, reduced to what inspection needs.
 pub(crate) struct Archive {
     pub(crate) manifest: Manifest,
+    /// The single directory every entry nests under, no trailing slash.
+    pub(crate) root: String,
     /// File entries only, relative to the package root, `/`-separated.
     pub(crate) entries: Vec<String>,
 }
@@ -131,6 +142,7 @@ pub fn verify_and_inspect(
     let inspection = Inspection {
         bin: resolve_bins(key, name, &archive, &mut warnings),
         has_install_script: has_install_script(&archive),
+        root: archive.root.clone(),
     };
 
     Ok((
@@ -219,7 +231,14 @@ fn read_archive(key: &str, bytes: &[u8]) -> Result<Archive, VendorError> {
         .map_err(|e| malformed(format!("package.json is not valid JSON: {e}")))?;
 
     entries.sort();
-    Ok(Archive { manifest, entries })
+    // Unreachable with `manifest_text` already unwrapped above: a
+    // `package.json` was found, so at least one entry set the root.
+    let root = root.unwrap_or_default();
+    Ok(Archive {
+        manifest,
+        root,
+        entries,
+    })
 }
 
 /// pnpm's rule, from `@pnpm/building.pkg-requires-build`: install scripts, a
@@ -454,6 +473,7 @@ mod tests {
     #[test]
     fn a_matching_integrity_verifies() {
         let v = inspect(&[("package.json", r#"{"name":"p"}"#)]);
+        assert_eq!(v.inspection.root, "package", "the usual npm shape");
         assert_eq!(v.sha256.len(), 64, "sha256 is 32 bytes of lowercase hex");
         assert!(
             v.sha256
@@ -500,6 +520,10 @@ mod tests {
         // malformed archive, so it must verify like any other.
         let v = inspect_rooted("estree", &[("package.json", r#"{"name":"@types/estree"}"#)]);
         assert_eq!(v.inspection.bin, BTreeMap::new());
+        assert_eq!(
+            v.inspection.root, "estree",
+            "the archive's actual root must be recorded, not assumed to be `package`"
+        );
     }
 
     #[test]
@@ -565,6 +589,7 @@ mod tests {
         let (v, _) = verify_and_inspect("p@1.0.0", "p", URL, &bytes, &i)
             .unwrap_or_else(|e| panic!("a pax global header must not be a second root: {e}"));
         assert_eq!(v.inspection.bin, BTreeMap::new());
+        assert_eq!(v.inspection.root, "package");
     }
 
     #[test]

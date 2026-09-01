@@ -230,6 +230,7 @@ fn run_vendor(
                         sha512: want.sha512.clone(),
                         sha256: verified.sha256,
                         size: verified.size,
+                        root: verified.inspection.root,
                         bin: verified.inspection.bin,
                         has_install_script: verified.inspection.has_install_script,
                     },
@@ -628,6 +629,7 @@ mod tests {
             sha512: sha512.to_string(),
             sha256: "deadbeef".to_string(),
             size: 1,
+            root: "package".to_string(),
             bin: BTreeMap::new(),
             has_install_script: false,
         }
