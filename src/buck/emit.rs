@@ -87,31 +87,26 @@ pub fn render(
             starlark_string(&format!("{name}_node_modules"))
         ));
         if !tree.copies.is_empty() {
-            let rendered: Vec<String> = tree
-                .copies
-                .iter()
-                .map(|(dest, key)| {
-                    format!(
-                        "{}: {}",
-                        starlark_string(dest),
-                        starlark_string(&format!(
-                            "//{third_party_label}:{}[root]",
-                            target_name(key)
-                        ))
-                    )
-                })
-                .collect();
-            out.push_str(&format!("    copies = {{{}}},\n", rendered.join(", ")));
+            out.push_str("    copies = {\n");
+            for (dest, key) in &tree.copies {
+                out.push_str(&format!(
+                    "        {}: {},\n",
+                    starlark_string(dest),
+                    starlark_string(&format!("//{third_party_label}:{}[root]", target_name(key)))
+                ));
+            }
+            out.push_str("    },\n");
         }
         if !tree.links.is_empty() {
-            let rendered: Vec<String> = tree
-                .links
-                .iter()
-                .map(|(dest, target)| {
-                    format!("{}: {}", starlark_string(dest), starlark_string(target))
-                })
-                .collect();
-            out.push_str(&format!("    links = {{{}}},\n", rendered.join(", ")));
+            out.push_str("    links = {\n");
+            for (dest, target) in &tree.links {
+                out.push_str(&format!(
+                    "        {}: {},\n",
+                    starlark_string(dest),
+                    starlark_string(target)
+                ));
+            }
+            out.push_str("    },\n");
         }
         out.push_str(")\n");
     }
