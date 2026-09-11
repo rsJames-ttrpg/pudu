@@ -3,7 +3,7 @@
 //! Static text. Nothing is interpolated, so this file is byte-identical in
 //! every project and carries none of `format.rs`'s escaping risk.
 
-const BODY: &str = r#"
+const BODY: &str = r##"
 load("@prelude//:rules.bzl", "http_archive")
 
 # `NodeToolchainInfo` is defined in `toolchains.bzl`, which `pudu init` writes
@@ -120,7 +120,118 @@ node_modules_tree = rule(
         "_node_toolchain": attrs.toolchain_dep(default = "toolchains//:node"),
     },
 )
-"#;
+
+_BUILD_APP = '''
+const fs = require("fs");
+const path = require("path");
+
+const [, , manifestPath, outDir] = process.argv;
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+
+// First-party sources are copied, never hardlinked. A hardlink would share
+// an inode with a file in the user's working tree, so an in-place write
+// would mutate a build output directly. The store's inodes are different in
+// kind: they belong to immutable buck-out extractions.
+for (const [dest, src] of Object.entries(manifest.copies)) {
+  const d = path.join(outDir, dest);
+  fs.mkdirSync(path.dirname(d), { recursive: true });
+  fs.copyFileSync(Array.isArray(src) ? src.join("") : src, d);
+}
+
+for (const [dest, target] of Object.entries(manifest.links)) {
+  const d = path.join(outDir, dest);
+  fs.mkdirSync(path.dirname(d), { recursive: true });
+  fs.symlinkSync(Array.isArray(target) ? target.join("") : target, d);
+}
+'''
+
+def _node_app_dir(ctx):
+    """The runnable directory: first-party sources plus one node_modules link.
+
+    Node finds `node_modules` by walking up from the main module's directory,
+    so the sources and the store have to meet. They meet here. The sources
+    are real files, so relative `require`s between them work; `node_modules`
+    is a single symlink into the tree, and Node realpaths it *into* the
+    genuine store where `.pnpm` isolation holds.
+    """
+    tree = ctx.attrs.node_modules[DefaultInfo].default_outputs[0]
+    app = ctx.actions.declare_output("app", dir = True)
+    builder = ctx.actions.write("build_app.js", _BUILD_APP)
+    copies = {src.short_path: src for src in ctx.attrs.srcs}
+    manifest = ctx.actions.write_json(
+        "app_manifest.json",
+        {
+            "copies": copies,
+            # `relative_to = (app, 0)` places the link relative to the app
+            # directory itself. One level off and the link dangles, which
+            # builds clean and fails only when Node runs.
+            "links": {"node_modules": cmd_args(tree, relative_to = (app, 0))},
+        },
+        with_inputs = True,
+    )
+    node = ctx.attrs._node_toolchain[NodeToolchainInfo].node
+    ctx.actions.run(
+        cmd_args(node, builder, manifest, app.as_output()),
+        category = "node_app",
+    )
+    return app, tree
+
+def _node_launcher(ctx, app):
+    node = ctx.attrs._node_toolchain[NodeToolchainInfo].node
+    return ctx.actions.write(
+        "run.sh",
+        cmd_args(
+            "#!/bin/sh",
+            "set -e",
+            cmd_args(
+                "exec",
+                node,
+                cmd_args(app, format = "{}/" + ctx.attrs.main),
+                "\"$@\"",
+                delimiter = " ",
+            ),
+            "",
+            delimiter = "\n",
+        ),
+        is_executable = True,
+        with_inputs = True,
+    )
+
+def _node_binary_impl(ctx):
+    app, tree = _node_app_dir(ctx)
+    launcher = _node_launcher(ctx, app)
+
+    # The tree is reached through a symlink that leaves the app output, so
+    # buck2 has no structural edge to it. It must be named in both places or
+    # it is not materialized and the link dangles.
+    return [
+        DefaultInfo(default_output = launcher, other_outputs = [app, tree]),
+        RunInfo(args = cmd_args(launcher, hidden = [app, tree])),
+    ]
+
+def _node_test_impl(ctx):
+    app, tree = _node_app_dir(ctx)
+    launcher = _node_launcher(ctx, app)
+    return [
+        DefaultInfo(default_output = launcher, other_outputs = [app, tree]),
+        RunInfo(args = cmd_args(launcher, hidden = [app, tree])),
+        ExternalRunnerTestInfo(
+            type = "node",
+            command = [cmd_args(launcher, hidden = [app, tree])],
+        ),
+    ]
+
+_NODE_ATTRS = {
+    "main": attrs.string(),
+    "node_modules": attrs.dep(),
+    "srcs": attrs.list(attrs.source(), default = []),
+    "_node_toolchain": attrs.toolchain_dep(default = "toolchains//:node"),
+}
+
+node_binary = rule(impl = _node_binary_impl, attrs = _NODE_ATTRS)
+
+node_test = rule(impl = _node_test_impl, attrs = _NODE_ATTRS)
+"##;
 
 pub fn render() -> String {
     format!("{}{}", crate::buck::HEADER, BODY)
@@ -228,5 +339,44 @@ mod tests {
             "the docstring must say why the obvious rule does not work, \
              or the next reader will try it again"
         );
+    }
+
+    #[test]
+    fn node_binary_is_defined() {
+        let s = render();
+        assert!(s.contains("node_binary = rule("));
+        assert!(s.contains("node_test = rule("));
+    }
+
+    /// The tree is reached through a symlink that leaves the app output, which
+    /// is a dependency buck2 does not track structurally. Absent from either
+    /// place, buck2 does not materialize it and the link dangles — and a
+    /// dangling link builds clean (S5 design §1.3).
+    #[test]
+    fn node_binary_keeps_the_tree_materialized() {
+        let s = render();
+        assert!(s.contains("other_outputs = [app, tree]"));
+        assert!(s.contains("hidden = [app, tree]"));
+    }
+
+    #[test]
+    fn node_binary_places_the_tree_link_relative_to_the_app_directory() {
+        let s = render();
+        assert!(s.contains("relative_to = (app, 0)"));
+    }
+
+    #[test]
+    fn node_test_reports_itself_to_the_test_runner() {
+        let s = render();
+        assert!(s.contains("ExternalRunnerTestInfo"));
+    }
+
+    /// First-party sources are copied, never hardlinked: a hardlink would share
+    /// an inode with a file the user is editing, so an in-place write would
+    /// mutate a build output.
+    #[test]
+    fn node_binary_documents_why_first_party_sources_are_copied() {
+        let s = render();
+        assert!(s.contains("hardlink"));
     }
 }
