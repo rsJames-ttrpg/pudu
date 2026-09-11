@@ -121,11 +121,11 @@ toolchains/BUCK       # appended, marker-delimited (§3.3)
 
 The Buck2 prelude ships `system_python_toolchain` but **no Node equivalent**, so pudu supplies one. `.buckconfig` conventionally declares `toolchains` as a cell (`[cells] toolchains = toolchains`), so the target resolves as `toolchains//:node`.
 
-Ownership is split deliberately: the **rule definition** lives in pudu-owned `third-party/js/toolchains.bzl`; only the **instantiation** goes into the user's `toolchains/BUCK`, loaded across the cell boundary with an explicit `root//` prefix:
+Ownership is split deliberately: the **rule definition** lives in pudu-owned `third-party/js/toolchains.bzl`; only the **instantiation** goes into the user's `toolchains/BUCK`, loaded across the cell boundary with an explicit `@root//` prefix (S5: the `@` is mandatory — a `load()` import spec is `(@<cell>)//package:file.bzl`, and buck2 rejects a bare `root//` there with "Unable to parse import spec"; a target label, by contrast, omits the sigil):
 
 ```python
 # --- begin pudu-managed (do not edit inside this block) ---
-load("root//third-party/js:toolchains.bzl", "system_node_toolchain")
+load("@root//third-party/js:toolchains.bzl", "system_node_toolchain")
 system_node_toolchain(name = "node", visibility = ["PUBLIC"])
 # --- end pudu-managed ---
 ```
