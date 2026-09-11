@@ -335,7 +335,7 @@ fn unparseable_toolchain_name_falls_back_and_says_so() {
     assert!(!stderr.contains("warning:"), "{stderr}");
 }
 
-/// I8: the `root//` load label is anchored at the Buck cell root, not at
+/// I8: the `@root//` load label is anchored at the Buck cell root, not at
 /// init's own directory. Running below the lockfile directory must prefix
 /// the label with the path from that directory, and warn that the cell root
 /// is being guessed.

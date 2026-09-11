@@ -814,7 +814,7 @@ pub enum DeriveError {
 pub enum InitWarning {
     #[error(
         "initializing in {init_root}, but pnpm-lock.yaml is in {lockfile_dir}; \
-         assuming the Buck cell root is the latter for the `root//` load label in toolchains/BUCK"
+         assuming the Buck cell root is the latter for the `@root//` load label in toolchains/BUCK"
     )]
     #[diagnostic(
         severity(Warning),

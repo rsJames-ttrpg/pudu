@@ -109,9 +109,13 @@ pub fn render(
             out.push_str("    },\n");
         }
         // A tree is consumed by a `node_binary` in the importer's own
-        // package, which is outside `third_party_dir`, so a private target
-        // is useless. `npm_package` defaults the same way inside the macro;
-        // `node_modules_tree` is a rule, not a macro, so it is stated here.
+        // package, which is outside `third_party_dir`, so the target cannot
+        // be private. PUBLIC is sufficient rather than necessary: pudu knows
+        // each tree's single consumer, so a list naming just that importer's
+        // package would work too, and would be tighter. PUBLIC is what
+        // `npm_package` already defaults to inside the macro, and matching it
+        // keeps one story for the whole generated file; `node_modules_tree`
+        // is a rule, not a macro, so it has to be stated here.
         out.push_str("    visibility = [\"PUBLIC\"],\n");
         out.push_str(")\n");
     }

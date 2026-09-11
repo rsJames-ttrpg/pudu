@@ -145,7 +145,7 @@ Invariants:
 - **Nothing outside the markers is ever modified.** Detection is textual, and the write path only ever replaces the span between markers or appends after EOF.
 - **Idempotent.** Three consecutive `pudu init` runs produce a byte-identical `toolchains/BUCK`. Asserted in tests.
 - The resolved label is recorded as `[buck] node_toolchain` rather than hardcoded in the emitter, which doubles as the escape hatch for a user with their own toolchain. It is `toolchains//:node` for pudu's own block, and `toolchains//:<name>` when an existing user toolchain was found, taking `<name>` from that call's `name = "..."` argument (falling back to `node`, with a warning, when it cannot be read).
-- The `root//` prefix in the load label is anchored at the Buck cell root, which pudu cannot see. It is derived from `third_party_dir`, prefixed by init's path relative to the directory holding `pnpm-lock.yaml`; when those differ, init warns that the cell root is a guess.
+- The `@root//` prefix in the load label is anchored at the Buck cell root, which pudu cannot see. It is derived from `third_party_dir`, prefixed by init's path relative to the directory holding `pnpm-lock.yaml`; when those differ, init warns that the cell root is a guess.
 
 "A node toolchain already exists" is detected by scanning for a `system_node_toolchain(` call. Deliberately conservative: a false positive costs one printed line of manual instruction, while a false negative silently produces a duplicate target and a confusing Buck error.
 
