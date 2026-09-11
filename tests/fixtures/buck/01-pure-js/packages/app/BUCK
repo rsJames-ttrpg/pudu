@@ -1,0 +1,9 @@
+load("//third-party/js:pudu.bzl", "node_binary")
+
+node_binary(
+    name = "main",
+    main = "src/index.js",
+    srcs = ["src/index.js", "src/greet.js"],
+    node_modules = "//third-party/js:packages_app_node_modules",
+    visibility = ["PUBLIC"],
+)

@@ -108,6 +108,11 @@ pub fn render(
             }
             out.push_str("    },\n");
         }
+        // A tree is consumed by a `node_binary` in the importer's own
+        // package, which is outside `third_party_dir`, so a private target
+        // is useless. `npm_package` defaults the same way inside the macro;
+        // `node_modules_tree` is a rule, not a macro, so it is stated here.
+        out.push_str("    visibility = [\"PUBLIC\"],\n");
         out.push_str(")\n");
     }
 
@@ -310,6 +315,17 @@ mod tests {
             "\".pnpm/left-pad@1.3.0/node_modules/left-pad\": \
              \"//third-party/js:left-pad@1.3.0[root]\""
         ));
+    }
+
+    /// A tree is consumed from the importer's own package, outside
+    /// `third_party_dir`. Buck2 rules default to private visibility, so
+    /// without this every `node_binary` fails analysis with "is not visible
+    /// to" — a failure no unit test on the store layout can reach.
+    #[test]
+    fn a_tree_target_is_visible_outside_the_third_party_directory() {
+        let trees = BTreeMap::from([("packages/app".to_string(), tree_of(&[], &[]))]);
+        let out = render(&BTreeMap::new(), &trees, "third-party/js").unwrap();
+        assert!(out.contains("    visibility = [\"PUBLIC\"],\n)"), "{out}");
     }
 
     #[test]
