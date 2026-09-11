@@ -177,7 +177,19 @@ def _node_app_dir(ctx):
     return app, tree
 
 def _node_launcher(ctx, app):
+    """The `#!/bin/sh` wrapper that runs the app's main module.
+
+    `main` is interpolated into a shell script, so it is single-quoted here,
+    embedded `'` and all. It is first-party text from the user's own BUCK
+    file rather than package-supplied data, so the exposure is small — but a
+    `main` holding a space is an ordinary typo, and quoting turns it into a
+    plain "no such file" instead of a split command line. This is the same
+    hazard the whole `strip_prefix`-and-JSON-manifest design exists to avoid;
+    leaving one unquoted interpolation behind would only invite the next
+    reader to add another.
+    """
     node = ctx.attrs._node_toolchain[NodeToolchainInfo].node
+    main = ctx.attrs.main.replace("'", "'\\''")
     return ctx.actions.write(
         "run.sh",
         cmd_args(
@@ -186,7 +198,9 @@ def _node_launcher(ctx, app):
             cmd_args(
                 "exec",
                 node,
-                cmd_args(app, format = "{}/" + ctx.attrs.main),
+                # The app path is quoted along with `main`: one quoted word,
+                # so a space anywhere in either is inert.
+                cmd_args(app, format = "'{}/" + main + "'"),
                 "\"$@\"",
                 delimiter = " ",
             ),
@@ -363,6 +377,26 @@ mod tests {
     fn node_binary_places_the_tree_link_relative_to_the_app_directory() {
         let s = render();
         assert!(s.contains("relative_to = (app, 0)"));
+    }
+
+    /// `main` reaches a `/bin/sh` script by interpolation — the one place in
+    /// the generated Starlark where user text does, since everything a
+    /// package supplies travels as a JSON manifest instead.
+    #[test]
+    fn the_launcher_shell_quotes_main() {
+        let s = render();
+        assert!(
+            s.contains(r#"main = ctx.attrs.main.replace("'", "'\\''")"#),
+            "main must be single-quote escaped before it reaches the script"
+        );
+        assert!(
+            s.contains(r#"format = "'{}/" + main + "'""#),
+            "and interpolated inside the quotes"
+        );
+        assert!(
+            !s.contains(r#"format = "{}/" + ctx.attrs.main"#),
+            "the unquoted form must not come back"
+        );
     }
 
     #[test]
