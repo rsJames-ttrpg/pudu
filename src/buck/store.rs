@@ -93,6 +93,25 @@ fn reachable(graph: &Graph, nodes: &BTreeSet<String>, importer: &str) -> BTreeSe
     seen
 }
 
+/// The top-level link names `build` cannot place for this importer.
+///
+/// A `link:`, `file:` or `workspace:` root names another importer rather than
+/// a registry package, so its `Root::target` is `None` and there is nothing
+/// to point a symlink at. Resolving those is S5.5's job. Until then `build`
+/// simply omits them, which is the branch's defining hazard in miniature: the
+/// tree is missing a top-level entry, `buck2 build` is perfectly green, and
+/// the failure surfaces only when Node runs, as a `MODULE_NOT_FOUND` naming a
+/// first-party package. `buckify` warns on whatever this returns so the
+/// omission is at least said out loud.
+pub fn unresolved_links(graph: &Graph, importer: &str) -> Vec<String> {
+    graph
+        .roots
+        .iter()
+        .filter(|r| r.importer == importer && r.target.is_none())
+        .map(|r| r.link_name.clone())
+        .collect()
+}
+
 pub fn build(
     graph: &Graph,
     nodes: &BTreeSet<String>,
@@ -395,6 +414,68 @@ snapshots:
         nodes.insert("left-pad@1.3.0".to_string());
         let t = build(&graph, &nodes, &entries(&[]), ".");
         assert!(!t.copies.values().any(|k| k == "left-pad@1.3.0"));
+    }
+
+    /// A workspace whose importer depends on a sibling importer through
+    /// `link:`. The root carries no snapshot key, so nothing in the tree can
+    /// point at it.
+    fn workspace_lockfile() -> Lockfile {
+        serde_norway::from_str(
+            r#"
+lockfileVersion: '9.0'
+importers:
+  packages/app:
+    dependencies:
+      '@org/lib':
+        specifier: link:../lib
+        version: link:../lib
+      debug:
+        specifier: 4.3.4
+        version: 4.3.4
+  packages/lib: {}
+packages:
+  debug@4.3.4:
+    resolution: {integrity: sha512-x}
+  ms@2.1.2:
+    resolution: {integrity: sha512-x}
+snapshots:
+  debug@4.3.4:
+    dependencies:
+      ms: 2.1.2
+  ms@2.1.2: {}
+"#,
+        )
+        .unwrap()
+    }
+
+    /// The warning `buckify` prints is only as good as this list: a dropped
+    /// `link:` root is a missing top-level symlink, and a missing top-level
+    /// symlink builds clean.
+    #[test]
+    fn a_link_root_is_reported_as_unresolved() {
+        let graph = Graph::build(&workspace_lockfile()).unwrap();
+        assert_eq!(
+            unresolved_links(&graph, "packages/app"),
+            vec!["@org/lib".to_string()],
+            "only the link: root, and it must be named by its link name"
+        );
+    }
+
+    #[test]
+    fn a_registry_root_is_not_reported_as_unresolved() {
+        let graph = Graph::build(&workspace_lockfile()).unwrap();
+        assert!(!unresolved_links(&graph, "packages/app").contains(&"debug".to_string()));
+        assert!(unresolved_links(&graph, "packages/lib").is_empty());
+    }
+
+    /// And the tree really does lack it — the reason the warning exists.
+    #[test]
+    fn a_link_root_gets_no_top_level_link_in_the_tree() {
+        let graph = Graph::build(&workspace_lockfile()).unwrap();
+        let nodes: BTreeSet<String> = graph.nodes.keys().cloned().collect();
+        let t = build(&graph, &nodes, &entries(&[]), "packages/app");
+        assert!(t.links.contains_key("debug"));
+        assert!(!t.links.contains_key("@org/lib"));
     }
 
     /// An npm alias is the one case where the directory name under

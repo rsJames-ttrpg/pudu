@@ -87,6 +87,24 @@ pub fn run(check: bool) -> Result<()> {
         .collect();
     let importers: std::collections::BTreeSet<&str> =
         graph.roots.iter().map(|r| r.importer.as_str()).collect();
+
+    // `link:`, `file:` and `workspace:` roots point at another importer, not
+    // at a registry package, and S5's store layout has nothing to point a
+    // symlink at. S5.5 resolves them. Dropped in silence they would be this
+    // branch's defining hazard — a tree missing a top-level entry builds
+    // green and fails only when Node runs — so each one is named here.
+    for importer in &importers {
+        let unresolved = buck::store::unresolved_links(&graph, importer);
+        if !unresolved.is_empty() {
+            eprintln!(
+                "warning: importer {importer}: {} depend(s) on another workspace \
+                 package (link:/file:/workspace:) and are not yet materialized \
+                 in the generated node_modules tree (S5.5)",
+                unresolved.join(", ")
+            );
+        }
+    }
+
     let trees: BTreeMap<String, buck::store::Tree> = importers
         .into_iter()
         .map(|i| {

@@ -56,7 +56,9 @@ pub struct Root {
     pub importer: String,
     pub link_name: String,
     /// `None` for `link:`/`file:`/`workspace:` roots, which resolve to another
-    /// importer rather than a package. S5 makes those real.
+    /// importer rather than a package. S5.5 makes those real; until then S5's
+    /// store layout cannot materialize them, and `buckify` warns about each
+    /// one it drops (see `buck::store::unresolved_links`).
     pub target: Option<String>,
     pub specifier: String,
     pub kind: RootKind,
