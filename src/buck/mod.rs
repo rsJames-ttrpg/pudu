@@ -8,6 +8,7 @@ pub mod bzl;
 pub mod config;
 pub mod emit;
 pub mod format;
+pub mod store;
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
