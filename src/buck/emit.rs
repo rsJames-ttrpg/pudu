@@ -15,6 +15,15 @@ use crate::error::BuckError;
 use crate::lock::snapshot_key::target_name;
 use crate::packages::Entry;
 
+/// The symbols the generated `BUCK` loads from the generated `pudu.bzl`.
+///
+/// The two files are written by different modules from different strings, so
+/// nothing but this constant and the test below ties the load line to what
+/// `bzl::render` actually defines. Renaming a rule in one and not the other
+/// yields a `BUCK` that fails to parse — caught by the slow buck2 CI job, or
+/// here.
+const LOADED_SYMBOLS: [&str; 2] = ["node_modules_tree", "npm_package"];
+
 /// An importer path as a Buck target-name stem.
 ///
 /// The root importer is `.`, which is not a name; everything else is a
@@ -34,8 +43,10 @@ pub fn render(
 ) -> Result<String, BuckError> {
     let mut out = String::from(HEADER);
     out.push('\n');
+    let symbols: Vec<String> = LOADED_SYMBOLS.iter().map(|s| starlark_string(s)).collect();
     out.push_str(&format!(
-        "load(\"//{third_party_label}:pudu.bzl\", \"node_modules_tree\", \"npm_package\")\n"
+        "load(\"//{third_party_label}:pudu.bzl\", {})\n",
+        symbols.join(", ")
     ));
 
     // BTreeMap iteration is key order — lexicographic by `name@version`,
@@ -158,6 +169,22 @@ mod tests {
                 r#"load("//third-party/js:pudu.bzl", "node_modules_tree", "npm_package")"#
             )
         );
+    }
+
+    /// `BUCK` and `pudu.bzl` are rendered by different modules from different
+    /// strings; a rename in one leaves the other stale, and the only thing
+    /// that notices is the slow buck2 CI job. This notices in milliseconds.
+    #[test]
+    fn every_symbol_the_buck_file_loads_is_defined_by_pudu_bzl() {
+        let bzl = crate::buck::bzl::render();
+        for symbol in LOADED_SYMBOLS {
+            assert!(
+                bzl.contains(&format!("def {symbol}("))
+                    || bzl.contains(&format!("{symbol} = rule(")),
+                "BUCK loads {symbol}, but pudu.bzl defines neither a macro \
+                 `def {symbol}(` nor a rule `{symbol} = rule(`"
+            );
+        }
     }
 
     #[test]
