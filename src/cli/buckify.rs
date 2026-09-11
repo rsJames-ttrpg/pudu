@@ -64,6 +64,39 @@ pub fn run(check: bool) -> Result<()> {
         Loaded::Absent | Loaded::WrongVersion(_) => &empty,
     };
 
+    // S5 emits a single tree over the union of platform views. That is exact
+    // only while no package is platform-gated; the moment one is, the tree
+    // carries packages that do not belong on some platform. S5.5 replaces this
+    // with one tree per platform behind a select().
+    let views: Vec<&std::collections::BTreeSet<String>> =
+        matrix.views.values().map(|v| &v.nodes).collect();
+    if let Some(first) = views.first()
+        && views.iter().any(|v| v != first)
+    {
+        eprintln!(
+            "warning: configured platforms resolve to different package sets; \
+             the generated node_modules trees cover their union and are not \
+             yet platform-specific (S5.5)"
+        );
+    }
+
+    let union: std::collections::BTreeSet<String> = matrix
+        .views
+        .values()
+        .flat_map(|v| v.nodes.iter().cloned())
+        .collect();
+    let importers: std::collections::BTreeSet<&str> =
+        graph.roots.iter().map(|r| r.importer.as_str()).collect();
+    let trees: BTreeMap<String, buck::store::Tree> = importers
+        .into_iter()
+        .map(|i| {
+            (
+                i.to_string(),
+                buck::store::build(&graph, &union, entries, i),
+            )
+        })
+        .collect();
+
     // The load() label is a Buck cell path (relative to the cell root), not
     // a filesystem path — `third_party_dir` above is absolute (joined with
     // cwd) for reading and writing files, so `config.third_party_dir` (the
@@ -73,7 +106,7 @@ pub fn run(check: bool) -> Result<()> {
     // config.rs permits any of those (nothing there requires relative or
     // normalized), so the guarantee that an unparseable label is never
     // emitted lives here, not in validation.
-    let generated = buck::generate(entries, &config.platforms, &config.third_party_dir)?;
+    let generated = buck::generate(entries, &config.platforms, &trees, &config.third_party_dir)?;
 
     if check {
         generated.check(&third_party_dir)?;

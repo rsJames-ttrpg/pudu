@@ -135,6 +135,7 @@ impl Generated {
 pub fn generate(
     entries: &BTreeMap<String, Entry>,
     platforms: &BTreeMap<String, Platform>,
+    trees: &BTreeMap<String, store::Tree>,
     third_party_dir: &Path,
 ) -> Result<Generated, BuckError> {
     let label =
@@ -143,7 +144,7 @@ pub fn generate(
             reason,
         })?;
     Ok(Generated {
-        buck: emit::render(entries, &label)?,
+        buck: emit::render(entries, trees, &label)?,
         bzl: bzl::render(),
         config: config::render(platforms),
     })

@@ -10,18 +10,32 @@ use std::collections::BTreeMap;
 
 use crate::buck::HEADER;
 use crate::buck::format::{starlark_string, validate_bin_name};
+use crate::buck::store;
 use crate::error::BuckError;
 use crate::lock::snapshot_key::target_name;
 use crate::packages::Entry;
 
+/// An importer path as a Buck target-name stem.
+///
+/// The root importer is `.`, which is not a name; everything else is a
+/// workspace-relative directory path, and `/` is not legal in a target name.
+pub fn importer_target_name(importer: &str) -> String {
+    if importer == "." {
+        "root".to_string()
+    } else {
+        importer.replace('/', "_")
+    }
+}
+
 pub fn render(
     entries: &BTreeMap<String, Entry>,
+    trees: &BTreeMap<String, store::Tree>,
     third_party_label: &str,
 ) -> Result<String, BuckError> {
     let mut out = String::from(HEADER);
     out.push('\n');
     out.push_str(&format!(
-        "load(\"//{third_party_label}:pudu.bzl\", \"npm_package\")\n"
+        "load(\"//{third_party_label}:pudu.bzl\", \"node_modules_tree\", \"npm_package\")\n"
     ));
 
     // BTreeMap iteration is key order — lexicographic by `name@version`,
@@ -50,6 +64,58 @@ pub fn render(
         }
         out.push_str(")\n");
     }
+
+    // One `node_modules_tree` per importer, in `BTreeMap` order (which is
+    // importer-path order). Two importers can flatten to the same target
+    // name (`a/b` and `a_b`), which would produce a duplicate-target error
+    // from buck2 naming neither importer — caught here instead.
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for (importer, tree) in trees {
+        let name = importer_target_name(importer);
+        if let Some(first) = seen.get(&name) {
+            return Err(BuckError::ImporterNameCollision {
+                target: name,
+                first: first.clone(),
+                second: importer.clone(),
+            });
+        }
+        seen.insert(name.clone(), importer.clone());
+
+        out.push_str("\nnode_modules_tree(\n");
+        out.push_str(&format!(
+            "    name = {},\n",
+            starlark_string(&format!("{name}_node_modules"))
+        ));
+        if !tree.copies.is_empty() {
+            let rendered: Vec<String> = tree
+                .copies
+                .iter()
+                .map(|(dest, key)| {
+                    format!(
+                        "{}: {}",
+                        starlark_string(dest),
+                        starlark_string(&format!(
+                            "//{third_party_label}:{}[root]",
+                            target_name(key)
+                        ))
+                    )
+                })
+                .collect();
+            out.push_str(&format!("    copies = {{{}}},\n", rendered.join(", ")));
+        }
+        if !tree.links.is_empty() {
+            let rendered: Vec<String> = tree
+                .links
+                .iter()
+                .map(|(dest, target)| {
+                    format!("{}: {}", starlark_string(dest), starlark_string(target))
+                })
+                .collect();
+            out.push_str(&format!("    links = {{{}}},\n", rendered.join(", ")));
+        }
+        out.push_str(")\n");
+    }
+
     Ok(out)
 }
 
@@ -81,16 +147,22 @@ mod tests {
     #[test]
     fn the_file_opens_with_the_banner_and_loads_the_macro() {
         let t = one("left-pad@1.3.0", entry("https://r/lp.tgz", "package", &[]));
-        let out = render(&t, "third-party/js").unwrap();
+        let out = render(&t, &BTreeMap::new(), "third-party/js").unwrap();
         assert!(out.starts_with(crate::buck::HEADER));
-        assert!(out.contains(r#"load("//third-party/js:pudu.bzl", "npm_package")"#));
+        assert!(
+            out.contains(
+                r#"load("//third-party/js:pudu.bzl", "node_modules_tree", "npm_package")"#
+            )
+        );
     }
 
     #[test]
     fn the_load_label_follows_the_configured_third_party_dir() {
         let t = one("left-pad@1.3.0", entry("https://r/lp.tgz", "package", &[]));
-        let out = render(&t, "vendor/npm").unwrap();
-        assert!(out.contains(r#"load("//vendor/npm:pudu.bzl", "npm_package")"#));
+        let out = render(&t, &BTreeMap::new(), "vendor/npm").unwrap();
+        assert!(
+            out.contains(r#"load("//vendor/npm:pudu.bzl", "node_modules_tree", "npm_package")"#)
+        );
     }
 
     #[test]
@@ -103,7 +175,7 @@ mod tests {
             "@types/node@22.20.0",
             entry("https://r/node.tgz", "node v22.20", &[]),
         );
-        let out = render(&t, "third-party/js").unwrap();
+        let out = render(&t, &BTreeMap::new(), "third-party/js").unwrap();
         assert!(out.contains(r#"name = "@types+node@22.20.0","#), "{out}");
         assert!(!out.contains("@types/node@22.20.0"));
     }
@@ -114,7 +186,7 @@ mod tests {
             "@types/node@22.20.0",
             entry("https://r/node.tgz", "node v22.20", &[]),
         );
-        let out = render(&t, "third-party/js").unwrap();
+        let out = render(&t, &BTreeMap::new(), "third-party/js").unwrap();
         assert!(out.contains(r#"root = "node v22.20","#));
         assert!(!out.contains("strip_prefix"));
     }
@@ -122,7 +194,11 @@ mod tests {
     #[test]
     fn bin_is_omitted_when_empty_and_sorted_when_present() {
         let empty = one("left-pad@1.3.0", entry("https://r/lp.tgz", "package", &[]));
-        assert!(!render(&empty, "third-party/js").unwrap().contains("bin ="));
+        assert!(
+            !render(&empty, &BTreeMap::new(), "third-party/js")
+                .unwrap()
+                .contains("bin =")
+        );
 
         let two = one(
             "tool@1.0.0",
@@ -132,7 +208,7 @@ mod tests {
                 &[("zed", "z.js"), ("abe", "a.js")],
             ),
         );
-        let out = render(&two, "third-party/js").unwrap();
+        let out = render(&two, &BTreeMap::new(), "third-party/js").unwrap();
         let abe = out.find("\"abe\"").unwrap();
         let zed = out.find("\"zed\"").unwrap();
         assert!(abe < zed, "bin entries must be sorted");
@@ -145,7 +221,7 @@ mod tests {
             "alpha@1.0.0".to_string(),
             entry("https://r/a.tgz", "package", &[]),
         );
-        let out = render(&t, "third-party/js").unwrap();
+        let out = render(&t, &BTreeMap::new(), "third-party/js").unwrap();
         assert!(out.find("alpha@1.0.0").unwrap() < out.find("zeta@1.0.0").unwrap());
     }
 
@@ -156,7 +232,7 @@ mod tests {
             "semver@6.3.1".to_string(),
             entry("https://r/s6.tgz", "package", &[]),
         );
-        let out = render(&t, "third-party/js").unwrap();
+        let out = render(&t, &BTreeMap::new(), "third-party/js").unwrap();
         assert_eq!(out.matches("npm_package(").count(), 2);
         assert!(out.contains(r#"name = "semver@6.3.1","#));
         assert!(out.contains(r#"name = "semver@7.6.3","#));
@@ -168,7 +244,7 @@ mod tests {
             "tool@1.0.0",
             entry("https://r/t.tgz", "package", &[("bang!", "b.js")]),
         );
-        let err = render(&t, "third-party/js").unwrap_err();
+        let err = render(&t, &BTreeMap::new(), "third-party/js").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("tool@1.0.0"), "{msg}");
         assert!(msg.contains("bang!"), "{msg}");
@@ -182,8 +258,8 @@ mod tests {
             entry("https://r/a.tgz", "package", &[("x", "x.js")]),
         );
         assert_eq!(
-            render(&t, "third-party/js").unwrap(),
-            render(&t, "third-party/js").unwrap()
+            render(&t, &BTreeMap::new(), "third-party/js").unwrap(),
+            render(&t, &BTreeMap::new(), "third-party/js").unwrap()
         );
     }
 
@@ -192,8 +268,71 @@ mod tests {
         // sha512 is unverifiable by Buck2 (design §4); has_install_script is
         // S6's gate, not an http_archive attribute.
         let t = one("left-pad@1.3.0", entry("https://r/lp.tgz", "package", &[]));
-        let out = render(&t, "third-party/js").unwrap();
+        let out = render(&t, &BTreeMap::new(), "third-party/js").unwrap();
         assert!(!out.contains("sha512"));
         assert!(!out.contains("has_install_script"));
+    }
+
+    fn tree_of(links: &[(&str, &str)], copies: &[(&str, &str)]) -> store::Tree {
+        store::Tree {
+            copies: copies
+                .iter()
+                .map(|(d, k)| (d.to_string(), k.to_string()))
+                .collect(),
+            links: links
+                .iter()
+                .map(|(d, t)| (d.to_string(), t.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_root_importer_is_named_root() {
+        assert_eq!(importer_target_name("."), "root");
+    }
+
+    #[test]
+    fn a_nested_importer_flattens_its_path() {
+        assert_eq!(importer_target_name("packages/legacy"), "packages_legacy");
+    }
+
+    #[test]
+    fn a_tree_target_is_emitted_per_importer() {
+        let trees = BTreeMap::from([(
+            ".".to_string(),
+            tree_of(
+                &[("left-pad", ".pnpm/left-pad@1.3.0/node_modules/left-pad")],
+                &[(
+                    ".pnpm/left-pad@1.3.0/node_modules/left-pad",
+                    "left-pad@1.3.0",
+                )],
+            ),
+        )]);
+        let out = render(&BTreeMap::new(), &trees, "third-party/js").unwrap();
+        assert!(out.contains("node_modules_tree(\n    name = \"root_node_modules\","));
+        assert!(out.contains("\"left-pad\": \".pnpm/left-pad@1.3.0/node_modules/left-pad\""));
+        assert!(out.contains(
+            "\".pnpm/left-pad@1.3.0/node_modules/left-pad\": \
+             \"//third-party/js:left-pad@1.3.0[root]\""
+        ));
+    }
+
+    #[test]
+    fn the_tree_macro_is_loaded() {
+        let trees = BTreeMap::from([(".".to_string(), tree_of(&[], &[]))]);
+        let out = render(&BTreeMap::new(), &trees, "third-party/js").unwrap();
+        assert!(out.contains("\"node_modules_tree\""));
+    }
+
+    /// Two importers can flatten to the same target name. Emitting both would
+    /// produce a duplicate-target error from buck2 naming neither importer.
+    #[test]
+    fn colliding_importer_names_are_rejected() {
+        let trees = BTreeMap::from([
+            ("a/b".to_string(), tree_of(&[], &[])),
+            ("a_b".to_string(), tree_of(&[], &[])),
+        ]);
+        let err = render(&BTreeMap::new(), &trees, "third-party/js").unwrap_err();
+        assert!(matches!(err, BuckError::ImporterNameCollision { .. }));
     }
 }
