@@ -428,63 +428,74 @@ layout* (below). A package is just its extracted tarball. That is what makes the
 peer-instance explosion cheap — instances differ only in where they appear in a
 tree, never in the artifact they point at.
 
-`node_modules_tree` needs no custom rule at all. `filegroup` with `copy = False` calls `ctx.actions.symlinked_dir`, and its `srcs` accepts a dict of `path → artifact` — which is exactly a pnpm store layout:
+The store layout is a **rule pudu writes**, not a composition of prelude
+primitives. An earlier revision of this section claimed it "needs no custom
+rule at all" and gave a `filegroup(copy = False)` whose `srcs` dict mapped
+store paths to package targets. Node does not resolve through that layout.
+`filegroup(copy = False)` calls `ctx.actions.symlinked_dir`, so every store
+leaf is a symlink to its extraction directory; Node resolves `node_modules`
+symlinks to their real paths, which land outside the tree, and sibling lookup
+escapes with `Cannot find module`. `copy = True` fails oppositely, flattening
+the symlink pnpm's isolation depends on. The real pnpm shape — real
+directories at `.pnpm/<key>/node_modules/<pkg>`, relative symlinks within the
+tree — needs both from a single action, which no `filegroup` mode provides.
+Refuted in the S4 design §1.4 and re-measured in the S5 design §1.1–§1.2
+before any of it was implemented.
+
+The rule as shipped (S5) takes two flat dicts and builds the tree in one
+action:
 
 ```python
-filegroup(
-    name = "server_node_modules",
-    copy = False,
-    srcs = {
-        "node_modules/express": "//third-party/js:express@4.19.2",
-        "node_modules/.pnpm/express@4.19.2/node_modules/express": "//third-party/js:express@4.19.2",
-        "node_modules/.pnpm/express@4.19.2/node_modules/accepts": "//third-party/js:accepts@1.3.8",
-        "node_modules/.bin/esbuild": "//third-party/js:esbuild@0.23.0[bin/esbuild]",
+node_modules_tree = rule(
+    impl = _node_modules_tree_impl,
+    attrs = {
+        # store path -> the package target whose [root] is materialized there
+        "copies": attrs.dict(attrs.string(), attrs.dep(), default = {}),
+        # store path -> a tree-relative symlink target
+        "links": attrs.dict(attrs.string(), attrs.string(), default = {}),
+        "_node_toolchain": attrs.toolchain_dep(default = "toolchains//:node"),
     },
 )
 ```
 
-The dict is generated flat, one entry per edge in the store graph, and describes the whole layout in a single action.
+`_node_modules_tree_impl` declares one `dir = True` output, writes the two
+dicts through `ctx.actions.write_json(..., with_inputs = True)`, and runs a
+Node builder over that manifest. Entries in `copies` are **hardlinked** —
+pnpm's own strategy, which makes a tree cost O(entries) rather than O(bytes)
+— with a copy fallback for a cross-filesystem buck-out. Entries in `links`
+become real relative symlinks inside the output, which buck2 preserves
+verbatim.
 
-Platform variance lives here and nowhere else, since pruning changes *which* store
-paths exist. `node_modules_tree` emits one `filegroup` per platform plus an alias
-selecting between them — keeping the "select at the alias level" principle, and
-avoiding any dependence on `select()` working inside a dict-valued attribute:
+Two properties follow from the manifest, and both are deliberate. No package
+name, archive root or bin path is ever interpolated into a command line, so
+the unquoted-third-party-text hazard that ruled out `strip_prefix` cannot
+arise here by construction. And because a hardlinked entry shares an inode
+with buck2's extraction output, **nothing may ever write into a built tree**
+— which is also why `node_binary` copies first-party sources rather than
+hardlinking them.
 
-```python
-def node_modules_tree(name, srcs_by_platform, visibility = None):
-    for platform, srcs in srcs_by_platform.items():
-        native.filegroup(
-            name = "{}__{}".format(name, platform),
-            copy = False,
-            srcs = srcs,
-            visibility = [],
-        )
-    native.alias(
-        name = name,
-        actual = select({
-            "//third-party/js/config:{}".format(p): ":{}__{}".format(name, p)
-            for p in srcs_by_platform
-        }),
-        visibility = visibility or ["PUBLIC"],
-    )
-```
+The `links` values are relative, and their `../` depth is computed from each
+link's own path rather than being a constant: a scoped package occupies two
+path segments and so sits one directory deeper. A wrong depth, a missing
+hidden input and a pruned-away target all yield a dangling symlink, and a
+dangling symlink **builds clean** — which is why the CI gate is `buck2 run`,
+not `buck2 build`. See the S5 design §1.3 and §3.1.
 
-Node does **not** resolve through this layout as written. `filegroup(copy = False)`
-calls `ctx.actions.symlinked_dir`, so every store leaf is a symlink to its
-extraction directory; Node resolves `node_modules` symlinks to their real
-paths, which land outside the tree, and sibling lookup escapes. `copy = True`
-fails too, by flattening the symlink pnpm's isolation depends on. The real
-pnpm shape — real directories at `.pnpm/<key>/node_modules/<pkg>`, relative
-symlinks within the tree — resolves correctly but needs copies and intra-tree
-symlinks from a single action, which no `filegroup` mode provides. The store
-layout is therefore a rule pudu writes, designed in S5 where `node_binary`
-and `buck2 run` can prove it. See the S4 design, §1.4.
+Platform variance still lives here and nowhere else, since pruning changes
+*which* store paths exist, and it still resolves at the alias level: one
+`node_modules_tree` per platform plus an alias `select()`ing between them, so
+nothing depends on `select()` working inside a dict-valued attribute. S5
+shipped the single-platform slice; the per-platform arms and the alias land in
+S5.5.
 
-The `filegroup` example above illustrates the *shape* of the store layout
-only — scoped names using pnpm's `+` convention (`.pnpm/@scope+name@1.0.0/`)
-— not a working rule; the working rule is S5's.
-
-`node_binary` and `node_test` are thin: a generated launcher script plus `sh_binary`, taking the tree as a resource and the Node executable from a toolchain.
+`node_binary` and `node_test` are thin rules over that tree: a second action
+builds an app directory of copied first-party sources plus a single
+`node_modules` symlink into the tree, and a generated launcher script execs
+the toolchain's Node on the main module inside it. The tree is reached
+through a symlink that leaves the app output — an edge buck2 does not track
+structurally — so both rules must carry the tree in `RunInfo`'s hidden set
+and in `DefaultInfo`'s `other_outputs` or it is never materialized. `node_test`
+additionally reports itself through `ExternalRunnerTestInfo`.
 
 ### Toolchain
 
@@ -664,8 +675,8 @@ v1 fixtures:
 
 - **~~Lockfile v9 field inventory needs verification.~~ Resolved 2026-08-31.** The [v9 field survey](../research/2026-08-31-pnpm-lock-v9-field-survey.md) confirms `requiresBuild` is absent from all 18 v9 lockfiles examined, so §4's mandatory vendor pass stands. `hasBin` did survive into v9 as a bare boolean — not a bin map, but a useful cross-check against the vendor pass.
 - **pnpm lockfile format churn.** v9 has been stable across pnpm 9 and 10, but pnpm moves fast. Mitigation: reject unknown `lockfileVersion` loudly rather than parsing optimistically; CI tests against the min-supported and latest pnpm.
-- **Dependency cycles are universal, and constrain how the store may be split.** Every real lockfile surveyed contains cycles (`@babel/core` ↔ `@babel/helper-module-transforms`, `eslint` ↔ `@eslint-community/eslint-utils`). They are harmless here because the store is one `filegroup` whose cycle lives in symlink data, not in the Buck target graph. But S4 must not decompose the store into one target per package depending on its dependencies' targets — that reintroduces the cycle as a Buck target cycle. A split for scale must follow tarball-extraction lines, which are acyclic.
-- **`filegroup` scale.** A large workspace's store graph could produce a dict with tens of thousands of entries in one `filegroup`. Unknown whether Buck2's `symlinked_dir` handles that comfortably. Retargeted to S5: `node_modules_tree` is the rule that would emit such a dict, and S4 no longer emits it. Measure when S5 builds the tree; if it degrades, the fallback is per-package `filegroup`s composed into a tree.
+- **Dependency cycles are universal, and constrain how the store may be split.** Every real lockfile surveyed contains cycles (`@babel/core` ↔ `@babel/helper-module-transforms`, `eslint` ↔ `@eslint-community/eslint-utils`). They are harmless here because the store is one `node_modules_tree` action whose cycle lives in symlink data, not in the Buck target graph. But S4 must not decompose the store into one target per package depending on its dependencies' targets — that reintroduces the cycle as a Buck target cycle. A split for scale must follow tarball-extraction lines, which are acyclic.
+- **Store scale.** A large workspace's store graph could produce a manifest with tens of thousands of entries in one action. Retargeted S4 → S5 with `node_modules_tree`, and now to **S5.5**: S5 shipped the rule on a single-platform fixture, which is too small to measure. The `filegroup`-specific framing is obsolete — `symlinked_dir` is not involved — but the question is not: it is now whether one Node process hardlinking tens of thousands of entries, and buck2 hashing that output, stay comfortable. Measure when S5.5's per-platform trees land; if it degrades, the fallback is a split along tarball-extraction lines, which are acyclic.
 - **`.bin` sub-target extraction — resolved, confirmed.** `http_archive`'s `sub_targets` in dict form works for referencing a single file inside the extracted archive: `//third-party/js:pkg[bin/foo]` resolves. No genrule fallback is needed.
 - **Node's symlink realpath behaviour — resolved, refuted.** The design assumed Node resolves through a `filegroup(copy = False)` store layout unmodified, because "the layout is pnpm's." It does not: `symlinked_dir` makes every store leaf a symlink, Node realpaths `node_modules` symlinks to their targets by default, and sibling lookup escapes the tree. See the S4 design, §1.4, for the evidence.
 - **~~Bundled dependencies.~~ Resolved 2026-08-31.** pnpm already omits bundled names from the snapshot graph — the bundled package's snapshot carries no `dependencies` at all — so they never become edges and there is no double-install risk. Pudu parses the field and ignores it.

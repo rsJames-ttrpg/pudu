@@ -108,7 +108,7 @@ Stage spec: [S1](2026-08-31-pudu-s1-lockfile-design.md).
 
 **Scope:** Deterministic BUCK formatter for the package layer only. `npm_package` emission, `config/BUCK` generation, `pudu.bzl`. Snapshot tests via insta. Determinism test. The `node_modules_tree` store-layout generator moved to S5 (see below): it needs real directories and intra-tree symlinks from a single Buck action, which `filegroup` cannot provide, so it is a rule pudu must write rather than one composed from prelude primitives.
 
-This stage resolves two of design §12's three unknowns: `http_archive` `sub_targets` for `.bin`/`root` extraction (confirmed) and Node's symlink realpath behaviour under a `filegroup`-based store (refuted — see the S4 design §1.4). `filegroup` scale moves to S5 with the rule it concerns.
+This stage resolves two of design §12's three unknowns: `http_archive` `sub_targets` for `.bin`/`root` extraction (confirmed) and Node's symlink realpath behaviour under a `filegroup`-based store (refuted — see the S4 design §1.4). The third — store scale, filed as "`filegroup` scale" — moves with the rule it concerns: to S5, and from there to S5.5, since S5's single-platform fixture is too small to measure.
 
 **Exit criteria:**
 - `pudu buckify` on `01-pure-js` produces byte-identical artifacts matching golden files.
@@ -122,22 +122,53 @@ This stage resolves two of design §12's three unknowns: `http_archive` `sub_tar
 
 ---
 
-### S5 — Multi-platform, node_binary, toolchain, store layout ("esbuild day one")
+### S5 — Store layout, `node_binary`, and `buck2 run`
 
-**Scope:** The `node_modules_tree` store-layout generator (moved here from S4 — see above). Per-platform emission and the alias-with-select pattern. `system_node_toolchain`. `node_binary` and `node_test` macros. End-to-end `buck2 run`.
+**Scope:** The `node_modules_tree` store-layout generator (moved here from S4 — see above), as a rule pudu writes rather than a `filegroup`. The store-path computation feeding it. One tree per importer, emitted into `third-party/js/BUCK`. `node_binary` and `node_test`. Extending `01-pure-js` with a runnable importer, and upgrading the CI job from `buck2 build` to `buck2 run`.
 
-This stage resolves design §12's remaining unknown: `filegroup` scale on a realistic store graph.
+Single platform. Per-platform emission and the `select()` move to S5.5, below. Stage spec: [S5](2026-09-10-pudu-s5-store-layout-design.md).
+
+**Already done, needed no work:** `system_node_toolchain`. S0 writes the rule and its `NodeToolchainInfo { node: RunInfo }` provider into the user's `toolchains/`; S5 is merely the first stage to consume it. The roadmap listed it as S5 scope only because nothing had consumed it before.
+
+**Exit criteria:**
+- `pudu buckify` on `01-pure-js` emits one `node_modules_tree` per importer, byte-identically across runs.
+- The store paths match pnpm's shape: real directories at `.pnpm/<key>/node_modules/<pkg>`, tree-relative symlinks joining them, `../` depth computed from each link's own path rather than constant.
+- No emitted symlink dangles, checked over the whole fixture graph.
+- CI runs `buck2 run //packages/app:main` on Linux x86_64 and the program resolves its dependencies through the store.
+
+**Demo:** `buck2 run` on the fixture app starts Node, resolves `require`s through a pnpm-shaped store buck2 built, and prints.
+
+**Touches:** `src/buck/store.rs`, `src/buck/bzl.rs`, `src/buck/emit.rs`, `src/cli/buckify.rs`, `tests/buckify_tree.rs`, CI e2e workflow.
+
+**Shipped 2026-09-11:** 14 commits, 447 tests. What the stage found is more interesting than what it built:
+
+- **The design's premise was refuted before a line was implemented.** Design §8 had the store as a `filegroup` needing "no custom rule at all". S4 §1.4 showed Node cannot resolve through `symlinked_dir`'s output, and the S5 spike then measured the replacement against the CI-pinned buck2 rather than specifying it on faith. The store layout became a rule pudu writes, designed against evidence.
+- **The `../` arithmetic was right first time.** `store.rs`'s computed depth — the part most obviously fiddly, and the part `buck2 run` exercises most harshly — turned up no defect when the machinery finally ran. The mutation tests that gate it were written before it was trusted, not after.
+- **Two real defects surfaced only when the machinery first ran**, both latent and neither findable by unit test:
+  - **Every `toolchains/BUCK` pudu had ever written failed to parse.** `pudu init` emitted the `toolchains.bzl` load spec without the `@` cell sigil, and had done since S0. Nothing noticed because until S5 nothing had asked buck2 to resolve the node toolchain.
+  - **`node_modules_tree` targets were emitted private.** It is a `rule()`, not a macro, so it does not inherit the `visibility` default that the `npm_package` macro applies; the omission is invisible until another package tries to depend on a tree.
+- **The CI gate had to become `buck2 run`, not `buck2 build`.** A dangling symlink, a missing hidden input and a wrong `../` depth all build clean. `buck2 build` green was never evidence the store worked; only running Node through it is.
+
+Debt filed: TD-S5-01 … TD-S5-07 in [`../TECH_DEBT.md`](../TECH_DEBT.md).
+
+---
+
+### S5.5 — Multi-platform ("esbuild day one")
+
+**Scope:** Per-platform emission of the store, and the alias-with-`select()` over `config/` labels. The semver-stable bare alias (`//third-party/js:express`). The `02-platform-optional`, `03-peer-instances`, `04-musl` and `05-workspace` fixtures. macOS arm64 e2e in CI. The store-scale measurement owed since S4.
+
+`link:` roots between importers arrive here too — `Root::target` is `None` for those today, which is TD-S1-04 — as does TD-S2-06's ambiguous `select()`, which cannot arise until there are per-platform arms to be ambiguous between.
 
 **Exit criteria:**
 - `02-platform-optional` buckifies; CI runs `buck2 run //packages/app:main` on Linux x86_64 and macOS arm64, and the output proves the correct `@esbuild/*` was selected.
 - `03-peer-instances` produces distinct targets for distinct peer resolutions, both buildable.
 - `04-musl` emits the abi constraint on both platforms and buckifies.
-- `05-workspace` emits one `node_modules_tree` per importer over a shared store.
-- A store-layout scale measurement is recorded; if `filegroup` degrades, the per-package fallback is specced as a follow-up.
+- `05-workspace` emits one `node_modules_tree` per importer over a shared store, including a `link:` dependency between importers.
+- A store-scale measurement is recorded; if the single-action tree degrades, the split-along-extraction-lines fallback is specced as a follow-up.
 
 **Demo:** `buck2 run //packages/server:server` starts an express server whose TypeScript was compiled by tsc and whose esbuild resolved to the host's platform package.
 
-**Touches:** `src/buck/emit.rs`, `src/buck/bzl.rs`, CI e2e workflow.
+**Touches:** `src/buck/emit.rs`, `src/buck/store.rs`, `src/platform.rs`, CI e2e workflow.
 
 ---
 
@@ -233,7 +264,10 @@ Deferred deliberately; sequenced after real-world feedback.
                    S4 (first BUCK)
                            │
                            ▼
-         S5 (multi-platform, "esbuild day one")
+            S5 (store layout + buck2 run)
+                           │
+                           ▼
+        S5.5 (multi-platform, "esbuild day one")
                            │
                            ▼
                    S6 (script gate)
@@ -270,7 +304,8 @@ S1 and S2 can be developed in parallel after S0; both feed S3.
 | S3 | [2026-08-31-pudu-s3-vendor-design.md](./2026-08-31-pudu-s3-vendor-design.md) | [2026-08-31-pudu-s3-vendor.md](../plans/2026-08-31-pudu-s3-vendor.md) | ✅ shipped |
 | S3.5 | [2026-09-01-pudu-s3.5-package-table-design.md](./2026-09-01-pudu-s3.5-package-table-design.md) | [2026-09-01-pudu-s3.5-package-table.md](../plans/2026-09-01-pudu-s3.5-package-table.md) | ✅ shipped |
 | S4 | [2026-09-01-pudu-s4-buck-emitter-design.md](./2026-09-01-pudu-s4-buck-emitter-design.md) | [2026-09-01-pudu-s4-buck-emitter.md](../plans/2026-09-01-pudu-s4-buck-emitter.md) | ✅ shipped |
-| S5–S9 | (not yet written) | (not yet written) | ⬜ planned |
+| S5 | [2026-09-10-pudu-s5-store-layout-design.md](./2026-09-10-pudu-s5-store-layout-design.md) | [2026-09-11-pudu-s5-store-layout.md](../plans/2026-09-11-pudu-s5-store-layout.md) | ✅ shipped (14 commits, 447 tests) |
+| S5.5–S9 | (not yet written) | (not yet written) | ⬜ planned |
 
 ---
 

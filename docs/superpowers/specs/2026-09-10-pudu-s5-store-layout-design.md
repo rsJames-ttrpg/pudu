@@ -231,13 +231,24 @@ and `.pnpm/<key>/node_modules/.bin/<name>` for a package's own dependencies'
 bins. Both are symlinks to the owning package's bin path, and both follow §3.1's
 depth rule.
 
-**Stated assumption, not a measured fact:** the executable bit may need setting
-explicitly. pnpm chmods bin files at install time, and npm tarballs frequently
-ship them non-executable; the `[bin/*]` sub-targets S4 emits carry whatever the
-tarball contained. The implementation plan carries a task to check this against
-a real package — `semver@7.6.3` is already in the fixture — and to chmod in the
-builder if it holds. It is written here as an open question so that a passing
-build is not mistaken for a settled one.
+**Measured, and the assumption did not hold.** This section previously stated
+as an open question whether the executable bit needs setting explicitly, on the
+grounds that pnpm chmods bin files at install time and npm tarballs frequently
+ship them non-executable. Checked against the fixture's own `semver@7.6.3`: the
+tarball ships `bin/semver.js` at `0755`, and buck2's `http_archive` extraction
+preserves the mode through to the `[bin/*]` sub-target. **No chmod is
+performed**, in the builder or anywhere else.
+
+Chmodding would in fact have been wrong, not merely unnecessary. A store entry
+is hardlinked (§1.4), so it shares an inode with buck2's extraction output;
+chmodding through the link would mutate a cached artifact, which is precisely
+the hazard §1.4 records.
+
+The residual case is a package that genuinely ships its bin `0644`. Its
+`node_modules/.bin/` entry would not be directly runnable, and no package in
+the fixture set hits it. Filed as **TD-S5-03** rather than pre-solved: the fix
+is a copied, chmodded bin entry — not a chmod through the hardlink — and it
+should be written when a package that needs it actually exists.
 
 ---
 
