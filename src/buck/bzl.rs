@@ -374,9 +374,24 @@ mod tests {
     /// First-party sources are copied, never hardlinked: a hardlink would share
     /// an inode with a file the user is editing, so an in-place write would
     /// mutate a build output.
+    ///
+    /// The explanation has to sit in the app builder specifically. The tree
+    /// builder is the one that *does* hardlink, so a bare search for the word
+    /// anywhere in the file passes on `_BUILD_TREE`'s prose alone.
     #[test]
     fn node_binary_documents_why_first_party_sources_are_copied() {
         let s = render();
-        assert!(s.contains("hardlink"));
+        let app = s
+            .split_once("_BUILD_APP = ")
+            .expect("the app builder script must be defined")
+            .1;
+        assert!(
+            app.contains("never hardlinked"),
+            "the app builder must say why it copies"
+        );
+        assert!(
+            app.contains("a file in the user's working tree"),
+            "and name the inode it would otherwise share"
+        );
     }
 }

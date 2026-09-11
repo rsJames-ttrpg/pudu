@@ -192,7 +192,8 @@ mod tests {
     use crate::packages::Entry;
 
     /// A lockfile with one importer depending on `debug`, which depends on
-    /// `ms`; plus a scoped package depending on a scoped package.
+    /// `ms`; plus a scoped package depending on a scoped package, and a
+    /// package whose one dependency is an npm alias.
     fn lockfile() -> Lockfile {
         serde_norway::from_str(
             r#"
@@ -206,6 +207,9 @@ importers:
       '@jridgewell/gen-mapping':
         specifier: 0.3.5
         version: 0.3.5
+      has-alias:
+        specifier: 1.0.0
+        version: 1.0.0
 packages:
   debug@4.3.4:
     resolution: {integrity: sha512-x}
@@ -217,6 +221,10 @@ packages:
     resolution: {integrity: sha512-x}
   left-pad@1.3.0:
     resolution: {integrity: sha512-x}
+  has-alias@1.0.0:
+    resolution: {integrity: sha512-x}
+  string-width@4.2.3:
+    resolution: {integrity: sha512-x}
 snapshots:
   debug@4.3.4:
     dependencies:
@@ -227,6 +235,10 @@ snapshots:
       '@jridgewell/set-array': 1.2.1
   '@jridgewell/set-array@1.2.1': {}
   left-pad@1.3.0: {}
+  has-alias@1.0.0:
+    dependencies:
+      string-width-cjs: string-width@4.2.3
+  string-width@4.2.3: {}
 "#,
         )
         .unwrap()
@@ -383,5 +395,29 @@ snapshots:
         nodes.insert("left-pad@1.3.0".to_string());
         let t = build(&graph, &nodes, &entries(&[]), ".");
         assert!(!t.copies.values().any(|k| k == "left-pad@1.3.0"));
+    }
+
+    /// An npm alias is the one case where the directory name under
+    /// `node_modules/` and the package's own name differ: the edge is
+    /// `string-width-cjs: string-width@4.2.3`, so the link is *named*
+    /// `string-width-cjs` and *points at* `string-width`. Swapping the two
+    /// yields a link that dangles, and a dangling link builds clean.
+    #[test]
+    fn an_alias_edge_is_named_for_the_alias_and_points_at_the_real_package() {
+        let t = tree();
+        let dest = ".pnpm/has-alias@1.0.0/node_modules/string-width-cjs";
+        let target = t
+            .links
+            .get(dest)
+            .unwrap_or_else(|| panic!("no link at {dest}; links: {:?}", t.links.keys()));
+        assert_eq!(
+            target, "../../string-width@4.2.3/node_modules/string-width",
+            "link name on the left, real package name on the right"
+        );
+        assert!(
+            !t.links
+                .contains_key(".pnpm/has-alias@1.0.0/node_modules/string-width"),
+            "the alias must not also appear under the target's own name"
+        );
     }
 }
