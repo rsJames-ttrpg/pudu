@@ -179,7 +179,7 @@ mod tests {
     use super::*;
 
     fn block() -> String {
-        managed_block("root//third-party/js:toolchains.bzl")
+        managed_block("@root//third-party/js:toolchains.bzl")
     }
 
     #[test]

@@ -121,11 +121,11 @@ toolchains/BUCK       # appended, marker-delimited (§3.3)
 
 The Buck2 prelude ships `system_python_toolchain` but **no Node equivalent**, so pudu supplies one. `.buckconfig` conventionally declares `toolchains` as a cell (`[cells] toolchains = toolchains`), so the target resolves as `toolchains//:node`.
 
-Ownership is split deliberately: the **rule definition** lives in pudu-owned `third-party/js/toolchains.bzl`; only the **instantiation** goes into the user's `toolchains/BUCK`, loaded across the cell boundary with an explicit `root//` prefix:
+Ownership is split deliberately: the **rule definition** lives in pudu-owned `third-party/js/toolchains.bzl`; only the **instantiation** goes into the user's `toolchains/BUCK`, loaded across the cell boundary with an explicit `@root//` prefix (S5: the `@` is mandatory — a `load()` import spec is `(@<cell>)//package:file.bzl`, and buck2 rejects a bare `root//` there with "Unable to parse import spec"; a target label, by contrast, omits the sigil):
 
 ```python
 # --- begin pudu-managed (do not edit inside this block) ---
-load("root//third-party/js:toolchains.bzl", "system_node_toolchain")
+load("@root//third-party/js:toolchains.bzl", "system_node_toolchain")
 system_node_toolchain(name = "node", visibility = ["PUBLIC"])
 # --- end pudu-managed ---
 ```
@@ -145,7 +145,7 @@ Invariants:
 - **Nothing outside the markers is ever modified.** Detection is textual, and the write path only ever replaces the span between markers or appends after EOF.
 - **Idempotent.** Three consecutive `pudu init` runs produce a byte-identical `toolchains/BUCK`. Asserted in tests.
 - The resolved label is recorded as `[buck] node_toolchain` rather than hardcoded in the emitter, which doubles as the escape hatch for a user with their own toolchain. It is `toolchains//:node` for pudu's own block, and `toolchains//:<name>` when an existing user toolchain was found, taking `<name>` from that call's `name = "..."` argument (falling back to `node`, with a warning, when it cannot be read).
-- The `root//` prefix in the load label is anchored at the Buck cell root, which pudu cannot see. It is derived from `third_party_dir`, prefixed by init's path relative to the directory holding `pnpm-lock.yaml`; when those differ, init warns that the cell root is a guess.
+- The `@root//` prefix in the load label is anchored at the Buck cell root, which pudu cannot see. It is derived from `third_party_dir`, prefixed by init's path relative to the directory holding `pnpm-lock.yaml`; when those differ, init warns that the cell root is a guess.
 
 "A node toolchain already exists" is detected by scanning for a `system_node_toolchain(` call. Deliberately conservative: a false positive costs one printed line of manual instruction, while a false negative silently produces a duplicate target and a confusing Buck error.
 

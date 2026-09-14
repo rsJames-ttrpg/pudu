@@ -8,6 +8,7 @@ pub mod bzl;
 pub mod config;
 pub mod emit;
 pub mod format;
+pub mod store;
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -134,6 +135,7 @@ impl Generated {
 pub fn generate(
     entries: &BTreeMap<String, Entry>,
     platforms: &BTreeMap<String, Platform>,
+    trees: &BTreeMap<String, store::Tree>,
     third_party_dir: &Path,
 ) -> Result<Generated, BuckError> {
     let label =
@@ -142,7 +144,7 @@ pub fn generate(
             reason,
         })?;
     Ok(Generated {
-        buck: emit::render(entries, &label)?,
+        buck: emit::render(entries, trees, &label)?,
         bzl: bzl::render(),
         config: config::render(platforms),
     })

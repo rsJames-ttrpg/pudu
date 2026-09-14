@@ -615,6 +615,17 @@ pub enum BuckError {
     )]
     UnusableThirdPartyDir { path: PathBuf, reason: String },
 
+    #[error("two importers both map to the Buck target name `{target}`: `{first}` and `{second}`")]
+    #[diagnostic(
+        code(pudu::buckify::importer_name_collision),
+        help("rename one of the workspace directories, or give it a distinct path")
+    )]
+    ImporterNameCollision {
+        target: String,
+        first: String,
+        second: String,
+    },
+
     #[error("cannot write {path}")]
     #[diagnostic(code(pudu::buckify::write_failed))]
     WriteFailed {
@@ -644,6 +655,10 @@ impl BuckError {
             // The offending value came from pudu.toml, not from the command
             // line, so this is input-invalid too.
             BuckError::UnusableThirdPartyDir { .. } => ExitCode::InputInvalid,
+            // Both names came from pudu's own derivation of workspace
+            // directories, but the fix lives in pudu.toml/the workspace
+            // layout, not in pudu itself.
+            BuckError::ImporterNameCollision { .. } => ExitCode::InputInvalid,
             // An I/O failure mid-write or mid-read is unexpected, like any
             // other I/O failure elsewhere in pudu.
             BuckError::WriteFailed { .. } | BuckError::ReadFailed { .. } => ExitCode::Internal,
@@ -799,7 +814,7 @@ pub enum DeriveError {
 pub enum InitWarning {
     #[error(
         "initializing in {init_root}, but pnpm-lock.yaml is in {lockfile_dir}; \
-         assuming the Buck cell root is the latter for the `root//` load label in toolchains/BUCK"
+         assuming the Buck cell root is the latter for the `@root//` load label in toolchains/BUCK"
     )]
     #[diagnostic(
         severity(Warning),

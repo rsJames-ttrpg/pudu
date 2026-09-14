@@ -3,8 +3,13 @@
 //! Static text. Nothing is interpolated, so this file is byte-identical in
 //! every project and carries none of `format.rs`'s escaping risk.
 
-const BODY: &str = r#"
+const BODY: &str = r##"
 load("@prelude//:rules.bzl", "http_archive")
+
+# `NodeToolchainInfo` is defined in `toolchains.bzl`, which `pudu init` writes
+# into this same directory. That file is user-owned ("Safe to edit"), so this
+# load is a contract between a generated file and a user-editable one.
+load(":toolchains.bzl", "NodeToolchainInfo")
 
 def npm_package(name, url, sha256, size, root, bin = {}, visibility = None):
     """One registry tarball, extracted and verified by Buck.
@@ -33,7 +38,214 @@ def npm_package(name, url, sha256, size, root, bin = {}, visibility = None):
         sub_targets = sub_targets,
         visibility = visibility or ["PUBLIC"],
     )
-"#;
+
+_BUILD_TREE = '''
+const fs = require("fs");
+const path = require("path");
+
+const [, , manifestPath, outDir] = process.argv;
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+
+// Hardlink rather than copy: this is pnpm's own strategy, and it makes a
+// tree cost O(entries) instead of O(bytes). The inode is shared with
+// buck2's extraction output, so nothing may ever write into the tree.
+// linkSync fails across a filesystem boundary; copying is the fallback.
+function place(from, to) {
+  const st = fs.lstatSync(from);
+  if (st.isDirectory()) {
+    fs.mkdirSync(to, { recursive: true });
+    for (const entry of fs.readdirSync(from)) {
+      place(path.join(from, entry), path.join(to, entry));
+    }
+  } else if (st.isSymbolicLink()) {
+    place(fs.realpathSync(from), to);
+  } else {
+    try {
+      fs.linkSync(from, to);
+    } catch (e) {
+      fs.copyFileSync(from, to);
+    }
+  }
+}
+
+for (const [dest, src] of Object.entries(manifest.copies)) {
+  const d = path.join(outDir, dest);
+  fs.mkdirSync(path.dirname(d), { recursive: true });
+  place(Array.isArray(src) ? src.join("") : src, d);
+}
+
+for (const [dest, target] of Object.entries(manifest.links)) {
+  const d = path.join(outDir, dest);
+  fs.mkdirSync(path.dirname(d), { recursive: true });
+  fs.symlinkSync(Array.isArray(target) ? target.join("") : target, d);
+}
+'''
+
+def _node_modules_tree_impl(ctx):
+    """One importer's node_modules, shaped exactly like pnpm's.
+
+    This cannot be a `filegroup`. `copy = False` calls `symlinked_dir`, which
+    makes every store leaf a symlink out of the tree; Node realpaths through
+    those and sibling lookup escapes with `Cannot find module`. `copy = True`
+    fails oppositely, flattening the symlink pnpm's isolation depends on. The
+    real shape needs real directories and intra-tree relative symlinks from
+    one action, which no `filegroup` mode provides.
+
+    Inputs arrive as a JSON manifest, so no package name, archive root or bin
+    path is ever interpolated into a command line.
+    """
+    out = ctx.actions.declare_output("node_modules", dir = True)
+    builder = ctx.actions.write("build_tree.js", _BUILD_TREE)
+    copies = {
+        dest: dep[DefaultInfo].default_outputs[0]
+        for dest, dep in ctx.attrs.copies.items()
+    }
+    manifest = ctx.actions.write_json(
+        "tree_manifest.json",
+        {"copies": copies, "links": ctx.attrs.links},
+        with_inputs = True,
+    )
+    node = ctx.attrs._node_toolchain[NodeToolchainInfo].node
+    ctx.actions.run(
+        cmd_args(node, builder, manifest, out.as_output()),
+        category = "node_modules_tree",
+    )
+    return [DefaultInfo(default_output = out)]
+
+node_modules_tree = rule(
+    impl = _node_modules_tree_impl,
+    attrs = {
+        "copies": attrs.dict(attrs.string(), attrs.dep(), default = {}),
+        "links": attrs.dict(attrs.string(), attrs.string(), default = {}),
+        "_node_toolchain": attrs.toolchain_dep(default = "toolchains//:node"),
+    },
+)
+
+_BUILD_APP = '''
+const fs = require("fs");
+const path = require("path");
+
+const [, , manifestPath, outDir] = process.argv;
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+
+// First-party sources are copied, never hardlinked. A hardlink would share
+// an inode with a file in the user's working tree, so an in-place write
+// would mutate a build output directly. The store's inodes are different in
+// kind: they belong to immutable buck-out extractions.
+for (const [dest, src] of Object.entries(manifest.copies)) {
+  const d = path.join(outDir, dest);
+  fs.mkdirSync(path.dirname(d), { recursive: true });
+  fs.copyFileSync(Array.isArray(src) ? src.join("") : src, d);
+}
+
+for (const [dest, target] of Object.entries(manifest.links)) {
+  const d = path.join(outDir, dest);
+  fs.mkdirSync(path.dirname(d), { recursive: true });
+  fs.symlinkSync(Array.isArray(target) ? target.join("") : target, d);
+}
+'''
+
+def _node_app_dir(ctx):
+    """The runnable directory: first-party sources plus one node_modules link.
+
+    Node finds `node_modules` by walking up from the main module's directory,
+    so the sources and the store have to meet. They meet here. The sources
+    are real files, so relative `require`s between them work; `node_modules`
+    is a single symlink into the tree, and Node realpaths it *into* the
+    genuine store where `.pnpm` isolation holds.
+    """
+    tree = ctx.attrs.node_modules[DefaultInfo].default_outputs[0]
+    app = ctx.actions.declare_output("app", dir = True)
+    builder = ctx.actions.write("build_app.js", _BUILD_APP)
+    copies = {src.short_path: src for src in ctx.attrs.srcs}
+    manifest = ctx.actions.write_json(
+        "app_manifest.json",
+        {
+            "copies": copies,
+            # `relative_to = (app, 0)` places the link relative to the app
+            # directory itself. One level off and the link dangles, which
+            # builds clean and fails only when Node runs.
+            "links": {"node_modules": cmd_args(tree, relative_to = (app, 0))},
+        },
+        with_inputs = True,
+    )
+    node = ctx.attrs._node_toolchain[NodeToolchainInfo].node
+    ctx.actions.run(
+        cmd_args(node, builder, manifest, app.as_output()),
+        category = "node_app",
+    )
+    return app, tree
+
+def _node_launcher(ctx, app):
+    """The `#!/bin/sh` wrapper that runs the app's main module.
+
+    `main` is interpolated into a shell script, so it is single-quoted here,
+    embedded `'` and all. It is first-party text from the user's own BUCK
+    file rather than package-supplied data, so the exposure is small — but a
+    `main` holding a space is an ordinary typo, and quoting turns it into a
+    plain "no such file" instead of a split command line. This is the same
+    hazard the whole `strip_prefix`-and-JSON-manifest design exists to avoid;
+    leaving one unquoted interpolation behind would only invite the next
+    reader to add another.
+    """
+    node = ctx.attrs._node_toolchain[NodeToolchainInfo].node
+    main = ctx.attrs.main.replace("'", "'\\''")
+    return ctx.actions.write(
+        "run.sh",
+        cmd_args(
+            "#!/bin/sh",
+            "set -e",
+            cmd_args(
+                "exec",
+                node,
+                # The app path is quoted along with `main`: one quoted word,
+                # so a space anywhere in either is inert.
+                cmd_args(app, format = "'{}/" + main + "'"),
+                "\"$@\"",
+                delimiter = " ",
+            ),
+            "",
+            delimiter = "\n",
+        ),
+        is_executable = True,
+        with_inputs = True,
+    )
+
+def _node_binary_impl(ctx):
+    app, tree = _node_app_dir(ctx)
+    launcher = _node_launcher(ctx, app)
+
+    # The tree is reached through a symlink that leaves the app output, so
+    # buck2 has no structural edge to it. It must be named in both places or
+    # it is not materialized and the link dangles.
+    return [
+        DefaultInfo(default_output = launcher, other_outputs = [app, tree]),
+        RunInfo(args = cmd_args(launcher, hidden = [app, tree])),
+    ]
+
+def _node_test_impl(ctx):
+    app, tree = _node_app_dir(ctx)
+    launcher = _node_launcher(ctx, app)
+    return [
+        DefaultInfo(default_output = launcher, other_outputs = [app, tree]),
+        RunInfo(args = cmd_args(launcher, hidden = [app, tree])),
+        ExternalRunnerTestInfo(
+            type = "node",
+            command = [cmd_args(launcher, hidden = [app, tree])],
+        ),
+    ]
+
+_NODE_ATTRS = {
+    "main": attrs.string(),
+    "node_modules": attrs.dep(),
+    "srcs": attrs.list(attrs.source(), default = []),
+    "_node_toolchain": attrs.toolchain_dep(default = "toolchains//:node"),
+}
+
+node_binary = rule(impl = _node_binary_impl, attrs = _NODE_ATTRS)
+
+node_test = rule(impl = _node_test_impl, attrs = _NODE_ATTRS)
+"##;
 
 pub fn render() -> String {
     format!("{}{}", crate::buck::HEADER, BODY)
@@ -98,5 +310,122 @@ mod tests {
         // No interpolation of any kind, so there is no escaping risk here and
         // the file is byte-identical across every project.
         assert_eq!(render(), render());
+    }
+
+    #[test]
+    fn the_tree_rule_is_defined() {
+        let s = render();
+        assert!(s.contains("node_modules_tree = rule("));
+        assert!(s.contains("ctx.actions.declare_output(\"node_modules\", dir = True)"));
+    }
+
+    #[test]
+    fn the_tree_rule_takes_node_from_the_toolchain() {
+        let s = render();
+        assert!(s.contains("load(\":toolchains.bzl\", \"NodeToolchainInfo\")"));
+        assert!(s.contains("attrs.toolchain_dep(default = \"toolchains//:node\")"));
+    }
+
+    /// Package names, archive roots and bin paths reach the builder as JSON,
+    /// never as command-line arguments. This is what retires the `strip_prefix`
+    /// hazard class (S4 §1.4) by construction rather than by escaping.
+    #[test]
+    fn tree_inputs_travel_as_a_manifest_not_as_arguments() {
+        let s = render();
+        assert!(s.contains("ctx.actions.write_json("));
+        assert!(s.contains("with_inputs = True"));
+    }
+
+    /// pnpm's own strategy, and what makes a tree cost O(entries) rather than
+    /// O(bytes). The copy fallback covers a cross-filesystem buck-out.
+    #[test]
+    fn the_builder_hardlinks_with_a_copy_fallback() {
+        let s = render();
+        assert!(s.contains("fs.linkSync"));
+        assert!(s.contains("fs.copyFileSync"));
+    }
+
+    #[test]
+    fn the_macro_documents_why_the_tree_is_not_a_filegroup() {
+        let s = render();
+        assert!(
+            s.contains("filegroup"),
+            "the docstring must say why the obvious rule does not work, \
+             or the next reader will try it again"
+        );
+    }
+
+    #[test]
+    fn node_binary_is_defined() {
+        let s = render();
+        assert!(s.contains("node_binary = rule("));
+        assert!(s.contains("node_test = rule("));
+    }
+
+    /// The tree is reached through a symlink that leaves the app output, which
+    /// is a dependency buck2 does not track structurally. Absent from either
+    /// place, buck2 does not materialize it and the link dangles — and a
+    /// dangling link builds clean (S5 design §1.3).
+    #[test]
+    fn node_binary_keeps_the_tree_materialized() {
+        let s = render();
+        assert!(s.contains("other_outputs = [app, tree]"));
+        assert!(s.contains("hidden = [app, tree]"));
+    }
+
+    #[test]
+    fn node_binary_places_the_tree_link_relative_to_the_app_directory() {
+        let s = render();
+        assert!(s.contains("relative_to = (app, 0)"));
+    }
+
+    /// `main` reaches a `/bin/sh` script by interpolation — the one place in
+    /// the generated Starlark where user text does, since everything a
+    /// package supplies travels as a JSON manifest instead.
+    #[test]
+    fn the_launcher_shell_quotes_main() {
+        let s = render();
+        assert!(
+            s.contains(r#"main = ctx.attrs.main.replace("'", "'\\''")"#),
+            "main must be single-quote escaped before it reaches the script"
+        );
+        assert!(
+            s.contains(r#"format = "'{}/" + main + "'""#),
+            "and interpolated inside the quotes"
+        );
+        assert!(
+            !s.contains(r#"format = "{}/" + ctx.attrs.main"#),
+            "the unquoted form must not come back"
+        );
+    }
+
+    #[test]
+    fn node_test_reports_itself_to_the_test_runner() {
+        let s = render();
+        assert!(s.contains("ExternalRunnerTestInfo"));
+    }
+
+    /// First-party sources are copied, never hardlinked: a hardlink would share
+    /// an inode with a file the user is editing, so an in-place write would
+    /// mutate a build output.
+    ///
+    /// The explanation has to sit in the app builder specifically. The tree
+    /// builder is the one that *does* hardlink, so a bare search for the word
+    /// anywhere in the file passes on `_BUILD_TREE`'s prose alone.
+    #[test]
+    fn node_binary_documents_why_first_party_sources_are_copied() {
+        let s = render();
+        let app = s
+            .split_once("_BUILD_APP = ")
+            .expect("the app builder script must be defined")
+            .1;
+        assert!(
+            app.contains("never hardlinked"),
+            "the app builder must say why it copies"
+        );
+        assert!(
+            app.contains("a file in the user's working tree"),
+            "and name the inode it would otherwise share"
+        );
     }
 }

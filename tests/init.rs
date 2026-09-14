@@ -242,7 +242,7 @@ fn non_force_run_leaves_a_stale_managed_block_alone() {
     let d = workspace(true);
     fs::create_dir_all(d.path().join("toolchains")).unwrap();
     let stale_block = "# --- begin pudu-managed (do not edit inside this block) ---\n\
-         load(\"root//third-party/js:toolchains.bzl\", \"system_node_toolchain\")\n\
+         load(\"@root//third-party/js:toolchains.bzl\", \"system_node_toolchain\")\n\
          system_node_toolchain(name = \"node\", visibility = [\"//:x\"])\n\
          # --- end pudu-managed ---\n";
     fs::write(d.path().join("toolchains/BUCK"), stale_block).unwrap();
@@ -335,7 +335,7 @@ fn unparseable_toolchain_name_falls_back_and_says_so() {
     assert!(!stderr.contains("warning:"), "{stderr}");
 }
 
-/// I8: the `root//` load label is anchored at the Buck cell root, not at
+/// I8: the `@root//` load label is anchored at the Buck cell root, not at
 /// init's own directory. Running below the lockfile directory must prefix
 /// the label with the path from that directory, and warn that the cell root
 /// is being guessed.
@@ -355,7 +355,7 @@ fn load_label_is_relative_to_the_lockfile_directory() {
 
     let buck = fs::read_to_string(nested.join("toolchains/BUCK")).unwrap();
     assert!(
-        buck.contains("load(\"root//apps/web/third-party/js:toolchains.bzl\""),
+        buck.contains("load(\"@root//apps/web/third-party/js:toolchains.bzl\""),
         "the load label must resolve to the real directory: {buck}"
     );
     let stderr = String::from_utf8(out.stderr).unwrap();
@@ -377,7 +377,7 @@ fn load_label_has_no_prefix_at_the_lockfile_directory() {
     assert!(out.status.success());
     let buck = fs::read_to_string(d.path().join("toolchains/BUCK")).unwrap();
     assert!(
-        buck.contains("load(\"root//third-party/js:toolchains.bzl\""),
+        buck.contains("load(\"@root//third-party/js:toolchains.bzl\""),
         "{buck}"
     );
     let stderr = String::from_utf8(out.stderr).unwrap();

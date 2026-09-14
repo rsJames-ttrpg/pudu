@@ -82,7 +82,7 @@ jobs:
         run: cargo test --test buckify_scale -- --ignored --nocapture
 
   buck2-build:
-    name: buck2 build (generated output)
+    name: buck2 build and run (generated output)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,4 +119,16 @@ jobs:
         run: |
           buck2 build '//third-party/js:@types+node@22.20.0[root]'
           buck2 build '//third-party/js:semver@7.6.3[bin/semver]'
+        working-directory: tests/fixtures/buck/01-pure-js
+      - name: buck2 run (the store must actually resolve)
+        # `buck2 build` is not a sufficient gate for this stage. A dangling
+        # node_modules symlink, a tree missing from the RunInfo hidden set,
+        # and a wrong relative_to depth all BUILD CLEAN and fail only when
+        # node runs. See the S5 design, §1.3.
+        run: |
+          out=$(buck2 run //packages/app:main)
+          echo "$out"
+          echo "$out" | grep -q "hello from pudu"
+          echo "$out" | grep -q "/.pnpm/debug@4.3.4/node_modules/debug/"
+          echo "$out" | grep -q "/.pnpm/ms@2.1.2/node_modules/ms/"
         working-directory: tests/fixtures/buck/01-pure-js
