@@ -50,9 +50,20 @@ impl RawVersion {
     fn normalize(&self) -> String {
         match self {
             Self::Str(s) => s.clone(),
-            // `9.0` parses as a float; render it back to the lockfile's own
-            // one-decimal spelling rather than "9".
-            Self::Num(n) => format!("{n:.1}"),
+            // `9.0` parses as a float. A fixed one-decimal format
+            // (`format!("{n:.1}")`) truncates a value like `9.12` to "9.1",
+            // misreporting the actual unsupported version to the user.
+            // `Display` prints the minimal digits needed instead — but for
+            // a whole number it drops the decimal point entirely (`9.0`
+            // becomes "9"), which would make a legitimately-supported bare
+            // `lockfileVersion: 9.0` compare unequal to `SUPPORTED_VERSION`
+            // ("9.0") and get rejected as unsupported. So: use the minimal
+            // `Display` form, but restore a trailing ".0" when it has no
+            // decimal point at all.
+            Self::Num(n) => {
+                let s = format!("{n}");
+                if s.contains('.') { s } else { format!("{s}.0") }
+            }
         }
     }
 }
@@ -148,6 +159,36 @@ mod tests {
     fn accepts_quoted_and_unquoted_version() {
         assert!(parse(MINIMAL).is_ok());
         assert!(parse("lockfileVersion: 9.0\nimporters: {}\n").is_ok());
+    }
+
+    /// TD-S1-02: a bare-numeric `lockfileVersion` must not be truncated to
+    /// one decimal when rendered into an error message. `9.10` is not a
+    /// useful example here — it parses to the same f64 as `9.1`, so
+    /// truncation loses nothing for that specific input. `9.12` does show
+    /// the bug: `format!("{n:.1}")` would round it to "9.1", misreporting
+    /// the version actually found.
+    #[test]
+    fn a_bare_numeric_version_is_not_truncated_to_one_decimal() {
+        assert_eq!(RawVersion::Num(9.12).normalize(), "9.12");
+    }
+
+    /// The counterpart to the above: a whole-number bare version must still
+    /// render with its decimal point, so it compares equal to
+    /// `SUPPORTED_VERSION` ("9.0") rather than becoming "9" and being
+    /// rejected as unsupported.
+    #[test]
+    fn a_whole_number_bare_version_keeps_its_decimal_point() {
+        assert_eq!(RawVersion::Num(9.0).normalize(), "9.0");
+    }
+
+    #[test]
+    fn an_unsupported_bare_numeric_version_names_itself_precisely() {
+        let err = parse("lockfileVersion: 9.12\nimporters: {}\n").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("9.12"),
+            "must name the version actually found, not a truncated one: {msg}"
+        );
     }
 
     #[test]
