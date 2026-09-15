@@ -65,32 +65,43 @@ fn existing_node_toolchain(text: &str) -> Option<(String, bool)> {
         // Look for the call anywhere on the line (e.g. `x =
         // system_node_toolchain(...)`), tolerating whitespace before the
         // opening paren (e.g. `system_node_toolchain (...)`).
-        let Some(idx) = line.find(NAME) else {
-            continue;
-        };
-        let before_is_boundary = line[..idx]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
-        if !before_is_boundary {
-            continue;
+        //
+        // A line can contain more than one occurrence of the substring
+        // `NAME` (e.g. `not_system_node_toolchain(x) or
+        // system_node_toolchain(name = "node")`): the first occurrence
+        // failing the boundary or paren check must not skip past a real
+        // call later on the same line (TD-S0-12 regression), so every
+        // occurrence is scanned in turn, mirroring how `parse_name_argument`
+        // below re-scans `rest` rather than bailing on its first miss.
+        let mut search_from = 0;
+        while let Some(rel_idx) = line[search_from..].find(NAME) {
+            let idx = search_from + rel_idx;
+            search_from = idx + NAME.len();
+            let before_is_boundary = line[..idx]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            if !before_is_boundary {
+                continue;
+            }
+            let after = &line[idx + NAME.len()..];
+            if !after.trim_start().starts_with('(') {
+                continue;
+            }
+            // Arguments may wrap over several lines, so scan the rest of the
+            // file from the opening paren rather than just the rest of the
+            // line.
+            let paren = offset + idx + NAME.len() + (after.len() - after.trim_start().len());
+            let rest = &text[paren + 1..];
+            let args = match rest.find(')') {
+                Some(close) => &rest[..close],
+                None => rest,
+            };
+            return Some(match parse_name_argument(args) {
+                Some(name) if is_valid_buck_target_name(&name) => (name, true),
+                _ => ("node".to_string(), false),
+            });
         }
-        let after = &line[idx + NAME.len()..];
-        if !after.trim_start().starts_with('(') {
-            continue;
-        }
-        // Arguments may wrap over several lines, so scan the rest of the
-        // file from the opening paren rather than just the rest of the line.
-        let paren = offset + idx + NAME.len() + (after.len() - after.trim_start().len());
-        let rest = &text[paren + 1..];
-        let args = match rest.find(')') {
-            Some(close) => &rest[..close],
-            None => rest,
-        };
-        return Some(match parse_name_argument(args) {
-            Some(name) if is_valid_buck_target_name(&name) => (name, true),
-            _ => ("node".to_string(), false),
-        });
     }
     None
 }
@@ -524,6 +535,27 @@ mod tests {
         let (written, outcome) = apply(Some(existing), &block(), false);
         assert!(matches!(outcome, AppendOutcome::Appended));
         assert!(written.is_some());
+    }
+
+    /// TD-S0-12 fix-round-1 regression: a bad-prefix occurrence earlier on
+    /// the same line must not shadow a real `system_node_toolchain(...)`
+    /// call later on that line. The boundary check must re-scan from past
+    /// the failed occurrence rather than skipping the rest of the line, or
+    /// pudu appends a managed block declaring a *second*
+    /// `system_node_toolchain(name = "node")`, a duplicate target that
+    /// breaks the user's Buck file.
+    #[test]
+    fn a_bad_prefix_match_does_not_shadow_a_real_call_later_on_the_same_line() {
+        let existing = "not_system_node_toolchain(x) or system_node_toolchain(name = \"node\")\n";
+        let (written, outcome) = apply(Some(existing), &block(), false);
+        assert!(
+            written.is_none(),
+            "must not write over the real toolchain call: {outcome:?}"
+        );
+        match outcome {
+            AppendOutcome::ExistingToolchain { name, .. } => assert_eq!(name, "node"),
+            other => panic!("expected ExistingToolchain, got {other:?}"),
+        }
     }
 
     /// TD-S0-13: a managed block whose content differs from what pudu would
