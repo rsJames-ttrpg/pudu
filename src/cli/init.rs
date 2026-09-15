@@ -538,10 +538,23 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
             println!("wrote {}", tc_path.display());
         }
         AppendOutcome::AlreadyManaged => {
-            println!(
-                "{} already has a pudu-managed block (pass --force to refresh)",
-                tc_path.display()
-            );
+            if force {
+                // TD-S0-13 made force-over-an-already-current-block report
+                // AlreadyManaged (nothing to do) instead of re-Replacing a
+                // byte-identical block. This arm printed an unconditional
+                // "pass --force to refresh" before that change, which is
+                // false on a run that already passed --force and did
+                // nothing because the block was already current.
+                println!(
+                    "{} already has an up-to-date pudu-managed block; nothing to do",
+                    tc_path.display()
+                );
+            } else {
+                println!(
+                    "{} already has a pudu-managed block (pass --force to refresh)",
+                    tc_path.display()
+                );
+            }
         }
         AppendOutcome::StaleManaged => {
             println!(

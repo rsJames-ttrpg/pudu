@@ -96,6 +96,30 @@ fn force_overwrites() {
     );
 }
 
+/// TD-S0-13 fix-round-1 regression: `pudu init --force` against a workspace
+/// whose `toolchains/BUCK` block is already current must not tell the user
+/// to pass `--force` — they just did. Before TD-S0-13 this case reported
+/// `Replaced` and printed "wrote toolchains/BUCK"; after TD-S0-13 it
+/// (correctly) reports `AlreadyManaged`, but the printed message was
+/// unconditional and still said "pass --force to refresh" even on a run
+/// that was already forced.
+#[test]
+fn force_on_an_already_current_block_does_not_tell_the_user_to_pass_force() {
+    let d = workspace(true);
+    pudu(d.path()).arg("init").output().unwrap();
+    let out = pudu(d.path()).args(["init", "--force"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !stdout.contains("pass --force to refresh"),
+        "a forced run must not ask the user to pass a flag they just passed: {stdout}"
+    );
+}
+
 #[test]
 fn toolchain_append_is_idempotent() {
     let d = workspace(true);
