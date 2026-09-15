@@ -196,6 +196,26 @@ mod tests {
         assert_eq!(RawVersion::Num(9.0).normalize(), "9.0");
     }
 
+    /// The old `format!("{n:.1}")` did not merely truncate when *reporting* a
+    /// version — it rounded, and `normalize()` feeds the supported-version
+    /// comparison itself. So `8.96`, `9.04` and `9.0499` all became "9.0" and
+    /// were accepted as a supported v9.0 lockfile, silently, on a value pudu
+    /// has never been tested against. That is the more serious half of
+    /// TD-S1-02 and it went unrecorded by the row, so it is pinned here
+    /// rather than left to the two tests that only cover the message text.
+    #[test]
+    fn a_near_miss_bare_version_is_not_rounded_into_the_supported_one() {
+        for near in ["8.96", "9.04", "9.0499"] {
+            let src = format!("lockfileVersion: {near}\nimporters: {{}}\n");
+            let err = parse(&src).expect_err("a near-miss version must not be accepted as 9.0");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(near),
+                "{near} must be rejected and named, not rounded to 9.0: {msg}"
+            );
+        }
+    }
+
     #[test]
     fn an_unsupported_bare_numeric_version_names_itself_precisely() {
         let err = parse("lockfileVersion: 9.12\nimporters: {}\n").unwrap_err();
