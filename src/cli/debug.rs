@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::cli::context::load_lenient;
 use crate::error::render;
-use crate::lock::{Graph, SUPPORTED_VERSION};
+use crate::lock::Graph;
 use crate::platform::constraints::constraint_labels;
 use crate::platform::prune::prune;
 
@@ -19,12 +19,14 @@ pub fn print_graph() -> Result<()> {
     let (_config, lockfile) = load_lenient()?;
     let graph = Graph::build(&lockfile)?;
     let out = serde_json::json!({
-        // The constant, not an observation of the parsed file: `parse_lockfile`
-        // already rejected anything but `SUPPORTED_VERSION` above, so this
-        // field can never disagree with the binary. A test asserting
-        // `== "9.0"` therefore cannot catch a regression here — it would need
-        // to instead assert against the gate in `parse_lockfile`/`LockError`.
-        "lockfile_version": SUPPORTED_VERSION,
+        // The version `parse_lockfile` actually observed in the file (set
+        // on `Lockfile::lockfile_version`), not the `SUPPORTED_VERSION`
+        // constant — today the two can never disagree, since anything but
+        // `SUPPORTED_VERSION` is rejected before this point, but reporting
+        // the observation rather than the constant means this field (and a
+        // test asserting its value) is capable of catching a regression
+        // once/if a second lockfile version is ever supported.
+        "lockfile_version": lockfile.lockfile_version,
         "settings": lockfile.settings,
         "roots": graph.roots,
         "nodes": graph.nodes,

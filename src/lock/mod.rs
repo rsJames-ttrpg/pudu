@@ -105,10 +105,12 @@ pub fn parse_lockfile(text: &str, path: &Path) -> Result<(Lockfile, Vec<LockWarn
         return Err(LockError::PatchedDependencies);
     }
 
-    let lockfile: Lockfile = serde_norway::from_str(text).map_err(|source| LockError::Yaml {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut lockfile: Lockfile =
+        serde_norway::from_str(text).map_err(|source| LockError::Yaml {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    lockfile.lockfile_version = found.expect("gated to Some(SUPPORTED_VERSION) above");
 
     if lockfile.settings.exclude_links_from_lockfile {
         return Err(LockError::ExcludedLinks);
@@ -159,6 +161,19 @@ mod tests {
     fn accepts_quoted_and_unquoted_version() {
         assert!(parse(MINIMAL).is_ok());
         assert!(parse("lockfileVersion: 9.0\nimporters: {}\n").is_ok());
+    }
+
+    /// TD-S1-08: `Lockfile::lockfile_version` must carry the version
+    /// `parse_lockfile` actually observed, not merely default to it — the
+    /// struct's `#[serde(skip)]` field defaults to `""`, so this test would
+    /// fail (empty string) if `parse_lockfile` ever stopped setting it.
+    #[test]
+    fn parsed_lockfile_reports_the_version_it_observed() {
+        let (quoted, _) = parse(MINIMAL).unwrap();
+        assert_eq!(quoted.lockfile_version, "9.0");
+
+        let (bare, _) = parse("lockfileVersion: 9.0\nimporters: {}\n").unwrap();
+        assert_eq!(bare.lockfile_version, "9.0");
     }
 
     /// TD-S1-02: a bare-numeric `lockfileVersion` must not be truncated to
