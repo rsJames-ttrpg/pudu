@@ -557,6 +557,12 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
                 tc_path.display()
             );
         }
+        AppendOutcome::StaleManaged => {
+            println!(
+                "{} has an outdated pudu-managed block (pass --force to refresh)",
+                tc_path.display()
+            );
+        }
         AppendOutcome::ExistingToolchain { name, parsed } => {
             eprint!(
                 "{}",

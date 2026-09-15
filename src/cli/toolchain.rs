@@ -31,6 +31,11 @@ pub enum AppendOutcome {
     Appended,
     /// A current managed block is already present; nothing to do.
     AlreadyManaged,
+    /// A managed block is present but its contents differ from what pudu
+    /// would write today (e.g. written by an older pudu version); distinct
+    /// from `AlreadyManaged` so the caller can say the block is stale rather
+    /// than implying it is up to date.
+    StaleManaged,
     /// `--force` replaced the contents of an existing managed block.
     Replaced,
     /// A node toolchain the user owns was found; pudu did not write.
@@ -145,9 +150,6 @@ pub fn apply(existing: Option<&str>, block: &str, force: bool) -> (Option<String
 
     match (begin_count, end_count, begin, end) {
         (1, 1, Some(b), Some(e)) if e > b => {
-            if !force {
-                return (None, AppendOutcome::AlreadyManaged);
-            }
             // Replace exactly the marked span, including END's trailing
             // line ending (bare `\n` or `\r\n`). Using the FIRST occurrence's
             // offsets is only sound because the `(1, 1, ..)` gate above
@@ -157,6 +159,13 @@ pub fn apply(existing: Option<&str>, block: &str, force: bool) -> (Option<String
                 tail = text.len() - after.len();
             } else if text[tail..].starts_with('\n') {
                 tail += 1;
+            }
+            let current_block = &text[b..tail];
+            if current_block == block {
+                return (None, AppendOutcome::AlreadyManaged);
+            }
+            if !force {
+                return (None, AppendOutcome::StaleManaged);
             }
             let mut out = String::with_capacity(text.len() + block.len());
             out.push_str(&text[..b]);
@@ -372,13 +381,24 @@ mod tests {
     /// IMPORTANT 4: the force path is the one that could grow the file on
     /// every run (each run replaces the span with a fresh copy of `block`);
     /// assert it converges rather than accumulating bytes.
+    ///
+    /// TD-S0-13 changed what "converges" looks like here: once the block's
+    /// content actually matches `block`, `apply` reports `AlreadyManaged`
+    /// with `written: None` rather than re-`Replaced`-ing a byte-identical
+    /// span (previously it kept reporting `Replaced` forever, which is the
+    /// bug this row closes — that outcome could not distinguish a stale
+    /// block from a fresh one). `written: None` means "the file already
+    /// looks like `stable`", not "nothing has been written yet", so the loop
+    /// carries `current` forward across a `None` instead of unwrapping it.
     #[test]
     fn is_idempotent_across_three_forced_runs() {
         let mut current: Option<String> = None;
         let mut lengths = Vec::new();
         for _ in 0..3 {
             let (written, _) = apply(current.as_deref(), &block(), true);
-            current = written;
+            if let Some(w) = written {
+                current = Some(w);
+            }
             lengths.push(current.as_ref().unwrap().len());
         }
         assert_eq!(
@@ -388,9 +408,13 @@ mod tests {
         let stable = current.clone().unwrap();
 
         let (written, outcome) = apply(current.as_deref(), &block(), true);
-        assert!(matches!(outcome, AppendOutcome::Replaced));
+        assert!(matches!(outcome, AppendOutcome::AlreadyManaged));
+        assert!(
+            written.is_none(),
+            "no further write is needed once the block already matches"
+        );
         assert_eq!(
-            written.unwrap(),
+            current.unwrap(),
             stable,
             "forced runs must converge to identical bytes"
         );
@@ -486,6 +510,20 @@ mod tests {
         let (written, outcome) = apply(Some(existing), &block(), false);
         assert!(matches!(outcome, AppendOutcome::Appended));
         assert!(written.is_some());
+    }
+
+    /// TD-S0-13: a managed block whose content differs from what pudu would
+    /// write today (e.g. left by an older pudu version) must be reported
+    /// distinctly from an up-to-date block, not folded into `AlreadyManaged`.
+    #[test]
+    fn stale_block_from_an_older_pudu_is_reported_distinctly() {
+        let stale = format!(
+            "{BEGIN}\nload(\"old_label.bzl\", \"system_node_toolchain\")\n\
+             system_node_toolchain(name = \"node\")\n{END}\n"
+        );
+        let (written, outcome) = apply(Some(&stale), &block(), false);
+        assert!(written.is_none());
+        assert!(matches!(outcome, AppendOutcome::StaleManaged));
     }
 
     #[test]
