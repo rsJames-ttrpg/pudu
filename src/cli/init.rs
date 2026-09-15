@@ -493,20 +493,6 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
         _ => crate::config::default_node_toolchain(),
     };
 
-    // pudu.toml
-    std::fs::write(
-        &config_path,
-        render_config(
-            &lockfile_rel,
-            &third_party_rel,
-            &node_toolchain,
-            &derived.platforms,
-            found.is_some(),
-        ),
-    )
-    .with_context(|| format!("cannot write {}", config_path.display()))?;
-    println!("wrote {}", config_path.display());
-
     // third-party/js skeleton. `--force` governs pudu.toml and the
     // toolchains/BUCK managed block only (spec, commit f4c5b0c). The
     // user-owned files here — toolchains.bzl, .gitignore, fixups/ — are never
@@ -597,6 +583,27 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
             next_steps = "add the block above to toolchains/BUCK, then pudu vendor && pudu buckify";
         }
     }
+
+    // pudu.toml is written last, after every write that can fail
+    // independently (third-party/js/*, toolchains/BUCK) has already
+    // succeeded (TD-S0-24). `config_path.exists()` is the guard a re-run
+    // without `--force` checks at the top of this function, so writing it
+    // last keeps that check meaning "init fully completed" rather than
+    // "init got partway through and then failed" — a partial failure here
+    // leaves nothing on disk that routes a retry into `--force` territory
+    // it does not actually need.
+    std::fs::write(
+        &config_path,
+        render_config(
+            &lockfile_rel,
+            &third_party_rel,
+            &node_toolchain,
+            &derived.platforms,
+            found.is_some(),
+        ),
+    )
+    .with_context(|| format!("cannot write {}", config_path.display()))?;
+    println!("wrote {}", config_path.display());
 
     if found.is_none() {
         println!("\nNext: edit `lockfile_path` in pudu.toml, then pudu config check");

@@ -487,3 +487,55 @@ fn success_path_warnings_render_as_diagnostics() {
         "the diagnostic code must be shown:\n{stderr}"
     );
 }
+
+/// TD-S0-24: if `toolchains/BUCK` can't be written, `pudu.toml` must not be
+/// left on disk either — otherwise a bare re-run of `pudu init` hits the
+/// "already exists" guard before it ever gets a chance to retry the write
+/// that actually failed, and the user is pointed at `--force` to recover
+/// from pudu's own partial write instead of just re-running `init`.
+///
+/// `toolchains` is pre-created as a normal, empty, *writable* directory —
+/// so `read_to_string(toolchains/BUCK)` reports plain `NotFound` (existing
+/// content is `None`) exactly as it would on a totally fresh run — and then
+/// stripped of write permission, so only the later
+/// `std::fs::write(&tc_path, ...)` step fails. That isolates the write-order
+/// bug from the (already-correct) early read, which would otherwise abort
+/// the run before either write is attempted and make this test pass
+/// regardless of the fix.
+#[cfg(unix)]
+#[test]
+fn a_failed_toolchains_buck_write_leaves_no_pudu_toml_and_a_bare_rerun_succeeds() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let d = workspace(true);
+    let tc_dir = d.path().join("toolchains");
+    fs::create_dir_all(&tc_dir).unwrap();
+    fs::set_permissions(&tc_dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let out = pudu(d.path()).arg("init").output().unwrap();
+
+    // Restore write permission before any assertion can fail the test and
+    // skip cleanup, which would otherwise leave an unwritable directory in
+    // the tempdir's drop path.
+    fs::set_permissions(&tc_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        !out.status.success(),
+        "init must fail when toolchains/BUCK cannot be written: {out:?}"
+    );
+    assert!(
+        !d.path().join("pudu.toml").exists(),
+        "pudu.toml must not be left behind by a run that failed to finish scaffolding"
+    );
+
+    // Retry *without* --force: the previous run must not have left any
+    // sentinel that routes recovery through --force.
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(
+        out.status.success(),
+        "a bare re-run must succeed once the obstruction is gone: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(d.path().join("pudu.toml").exists());
+    assert!(d.path().join("toolchains/BUCK").exists());
+}
