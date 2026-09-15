@@ -142,11 +142,13 @@ pub fn apply(existing: Option<&str>, block: &str, force: bool) -> (Option<String
                 return (None, AppendOutcome::AlreadyManaged);
             }
             // Replace exactly the marked span, including END's trailing
-            // newline. Using the FIRST occurrence's offsets is only sound
-            // because the `(1, 1, ..)` gate above proves each marker occurs
-            // exactly once, so first == only.
+            // line ending (bare `\n` or `\r\n`). Using the FIRST occurrence's
+            // offsets is only sound because the `(1, 1, ..)` gate above
+            // proves each marker occurs exactly once, so first == only.
             let mut tail = e + END.len();
-            if text[tail..].starts_with('\n') {
+            if let Some(after) = text[tail..].strip_prefix("\r\n") {
+                tail = text.len() - after.len();
+            } else if text[tail..].starts_with('\n') {
                 tail += 1;
             }
             let mut out = String::with_capacity(text.len() + block.len());
@@ -450,6 +452,22 @@ mod tests {
                 "for {text}"
             );
         }
+    }
+
+    /// TD-S0-10: a CRLF file's trailing `\r\n` after `END` must be consumed
+    /// in full on `--force`, not just the `\n`, or a bare `\r` is left
+    /// behind as a stray blank line.
+    #[test]
+    fn force_on_a_crlf_file_consumes_the_full_line_ending() {
+        let stale = format!("{BEGIN}\r\nstale content\r\n{END}\r\n");
+        let existing = format!("before = 1\r\n{stale}after = 2\r\n");
+
+        let (written, outcome) = apply(Some(&existing), &block(), true);
+        assert!(matches!(outcome, AppendOutcome::Replaced));
+        let text = written.unwrap();
+
+        let expected = format!("before = 1\r\n{}after = 2\r\n", block());
+        assert_eq!(text, expected, "no stray blank line from a leftover \\r");
     }
 
     #[test]
