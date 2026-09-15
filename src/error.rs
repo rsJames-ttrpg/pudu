@@ -843,7 +843,23 @@ pub enum InitWarning {
     )]
     ThirdPartyFileExists { path: PathBuf },
 
-    #[error("{path} already declares a node toolchain (`:{name}`); leaving it alone")]
+    // F3 (fix round 2): `name` is only ever a real target from the file when
+    // `parsed` is true. TD-S0-22 widened what reaches this warning with
+    // `parsed: false` (a name can now be read-but-rejected as illegal, not
+    // just unreadable), so `(`:{name}`)` unconditionally naming `name` as
+    // the declared target reads as false when it is really pudu's own
+    // fallback — the file declares no target called `node`. Mark it as
+    // assumed rather than declared when `parsed` is false; the sibling
+    // `ToolchainNameUnparsed` warning printed right after already explains
+    // why, so the pair stays honest either way.
+    #[error(
+        "{path} already declares a node toolchain{}; leaving it alone",
+        if *parsed {
+            format!(" (`:{name}`)")
+        } else {
+            format!(" (assumed `:{name}`)")
+        }
+    )]
     #[diagnostic(
         severity(Warning),
         code(pudu::init::existing_toolchain),
@@ -853,6 +869,7 @@ pub enum InitWarning {
         path: PathBuf,
         name: String,
         recorded: String,
+        parsed: bool,
     },
 
     // Covers two distinct situations truthfully in one message (fix round

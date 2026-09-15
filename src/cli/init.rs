@@ -573,6 +573,7 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
                     path: tc_path.clone(),
                     name: name.clone(),
                     recorded: node_toolchain.clone(),
+                    parsed,
                 })
             );
             if !parsed {

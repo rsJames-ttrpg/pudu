@@ -359,6 +359,56 @@ fn unparseable_toolchain_name_falls_back_and_says_so() {
     assert!(!stderr.contains("warning:"), "{stderr}");
 }
 
+/// F3 (fix round 2): when the target name could not be read out of the call
+/// (or was read but rejected as illegal, TD-S0-22), the "already declares a
+/// node toolchain" warning must not claim the file declares a target called
+/// `node` — that is pudu's own fallback, not something the file contains.
+/// It must be marked as assumed instead.
+#[test]
+fn existing_toolchain_warning_marks_an_unparsed_name_as_assumed_not_declared() {
+    let d = workspace(true);
+    fs::create_dir_all(d.path().join("toolchains")).unwrap();
+    fs::write(
+        d.path().join("toolchains/BUCK"),
+        "system_node_toolchain(**MY_KWARGS)\n",
+    )
+    .unwrap();
+
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("declares a node toolchain (`:node`)"),
+        "must not claim the file declares a target that is really pudu's fallback: {stderr}"
+    );
+    assert!(
+        stderr.contains("declares a node toolchain (assumed `:node`)"),
+        "must mark the fallback name as assumed: {stderr}"
+    );
+}
+
+/// The counterpart: when the name *was* actually read out of the call, the
+/// warning must still name it as declared, not assumed.
+#[test]
+fn existing_toolchain_warning_names_a_parsed_target_as_declared_not_assumed() {
+    let d = workspace(true);
+    fs::create_dir_all(d.path().join("toolchains")).unwrap();
+    fs::write(
+        d.path().join("toolchains/BUCK"),
+        "system_node_toolchain(name = \"my_node\")\n",
+    )
+    .unwrap();
+
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("declares a node toolchain (`:my_node`)"),
+        "a genuinely parsed name must still be reported as declared: {stderr}"
+    );
+    assert!(!stderr.contains("assumed `:my_node`"), "{stderr}");
+}
+
 /// I8: the `@root//` load label is anchored at the Buck cell root, not at
 /// init's own directory. Running below the lockfile directory must prefix
 /// the label with the path from that directory, and warn that the cell root
