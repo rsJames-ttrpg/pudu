@@ -31,6 +31,11 @@ pub enum AppendOutcome {
     Appended,
     /// A current managed block is already present; nothing to do.
     AlreadyManaged,
+    /// A managed block is present but its contents differ from what pudu
+    /// would write today (e.g. written by an older pudu version); distinct
+    /// from `AlreadyManaged` so the caller can say the block is stale rather
+    /// than implying it is up to date.
+    StaleManaged,
     /// `--force` replaced the contents of an existing managed block.
     Replaced,
     /// A node toolchain the user owns was found; pudu did not write.
@@ -60,25 +65,43 @@ fn existing_node_toolchain(text: &str) -> Option<(String, bool)> {
         // Look for the call anywhere on the line (e.g. `x =
         // system_node_toolchain(...)`), tolerating whitespace before the
         // opening paren (e.g. `system_node_toolchain (...)`).
-        let Some(idx) = line.find(NAME) else {
-            continue;
-        };
-        let after = &line[idx + NAME.len()..];
-        if !after.trim_start().starts_with('(') {
-            continue;
+        //
+        // A line can contain more than one occurrence of the substring
+        // `NAME` (e.g. `not_system_node_toolchain(x) or
+        // system_node_toolchain(name = "node")`): the first occurrence
+        // failing the boundary or paren check must not skip past a real
+        // call later on the same line (TD-S0-12 regression), so every
+        // occurrence is scanned in turn, mirroring how `parse_name_argument`
+        // below re-scans `rest` rather than bailing on its first miss.
+        let mut search_from = 0;
+        while let Some(rel_idx) = line[search_from..].find(NAME) {
+            let idx = search_from + rel_idx;
+            search_from = idx + NAME.len();
+            let before_is_boundary = line[..idx]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            if !before_is_boundary {
+                continue;
+            }
+            let after = &line[idx + NAME.len()..];
+            if !after.trim_start().starts_with('(') {
+                continue;
+            }
+            // Arguments may wrap over several lines, so scan the rest of the
+            // file from the opening paren rather than just the rest of the
+            // line.
+            let paren = offset + idx + NAME.len() + (after.len() - after.trim_start().len());
+            let rest = &text[paren + 1..];
+            let args = match rest.find(')') {
+                Some(close) => &rest[..close],
+                None => rest,
+            };
+            return Some(match parse_name_argument(args) {
+                Some(name) if is_valid_buck_target_name(&name) => (name, true),
+                _ => ("node".to_string(), false),
+            });
         }
-        // Arguments may wrap over several lines, so scan the rest of the
-        // file from the opening paren rather than just the rest of the line.
-        let paren = offset + idx + NAME.len() + (after.len() - after.trim_start().len());
-        let rest = &text[paren + 1..];
-        let args = match rest.find(')') {
-            Some(close) => &rest[..close],
-            None => rest,
-        };
-        return Some(match parse_name_argument(args) {
-            Some(name) => (name, true),
-            None => ("node".to_string(), false),
-        });
     }
     None
 }
@@ -91,6 +114,33 @@ fn line_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
         offset += raw.len();
         (start, raw.trim_end_matches(['\n', '\r']))
     })
+}
+
+/// Is `s` a legal Buck target name?
+///
+/// Deliberately conservative and stricter than Buck's actual grammar: the
+/// name goes straight into a Buck label interpolated unescaped into
+/// `pudu.toml` (TD-S0-22), so anything that could break out of that label
+/// shape (whitespace, `:`, `"`, `/`) — or produce a label
+/// `config::is_buck_label` would nonetheless accept — must be rejected here
+/// rather than risk a corrupt or misleading generated config.
+///
+/// `/` is rejected even though Buck2 itself permits it in a target name
+/// (e.g. `node/v20`) — a false negative here only costs one printed
+/// fallback-to-`"node"` line, so this deliberately stays conservative
+/// rather than widening the accepted set late in a tech-debt cleardown; see
+/// TD-S0-22 fix-round-1 notes.
+///
+/// `.` and `..` are rejected explicitly even though every character in them
+/// individually passes the character-class check below: Buck2 rejects
+/// both as target names outright, and letting either through would produce
+/// a label like `toolchains//:..`.
+fn is_valid_buck_target_name(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-.+".contains(c))
 }
 
 /// Pull `"..."` out of a `name = "..."` keyword argument.
@@ -138,16 +188,38 @@ pub fn apply(existing: Option<&str>, block: &str, force: bool) -> (Option<String
 
     match (begin_count, end_count, begin, end) {
         (1, 1, Some(b), Some(e)) if e > b => {
-            if !force {
+            // Replace exactly the marked span, including END's trailing
+            // line ending (bare `\n` or `\r\n`). Using the FIRST occurrence's
+            // offsets is only sound because the `(1, 1, ..)` gate above
+            // proves each marker occurs exactly once, so first == only.
+            let mut tail = e + END.len();
+            if let Some(after) = text[tail..].strip_prefix("\r\n") {
+                tail = text.len() - after.len();
+            } else if text[tail..].starts_with('\n') {
+                tail += 1;
+            }
+            let current_block = &text[b..tail];
+            // F1 (fix round 2): `block` is always LF-only (`managed_block`
+            // never emits a carriage return), but on a Windows /
+            // `core.autocrlf` checkout the block pudu itself wrote comes
+            // back CRLF. Byte equality would then never match a
+            // semantically-identical block, reporting it stale forever
+            // and, on `--force`, splicing an LF-only block into a CRLF
+            // file (mixed endings) that a later checkout renormalizes
+            // right back to CRLF — recurring "outdated" reports with no
+            // way to actually reach "up to date". Normalize CRLF to LF on
+            // the existing side only (`block` never has a CR to
+            // normalize) before comparing.
+            let normalized_current = if current_block.contains('\r') {
+                std::borrow::Cow::Owned(current_block.replace("\r\n", "\n"))
+            } else {
+                std::borrow::Cow::Borrowed(current_block)
+            };
+            if normalized_current == block {
                 return (None, AppendOutcome::AlreadyManaged);
             }
-            // Replace exactly the marked span, including END's trailing
-            // newline. Using the FIRST occurrence's offsets is only sound
-            // because the `(1, 1, ..)` gate above proves each marker occurs
-            // exactly once, so first == only.
-            let mut tail = e + END.len();
-            if text[tail..].starts_with('\n') {
-                tail += 1;
+            if !force {
+                return (None, AppendOutcome::StaleManaged);
             }
             let mut out = String::with_capacity(text.len() + block.len());
             out.push_str(&text[..b]);
@@ -363,13 +435,24 @@ mod tests {
     /// IMPORTANT 4: the force path is the one that could grow the file on
     /// every run (each run replaces the span with a fresh copy of `block`);
     /// assert it converges rather than accumulating bytes.
+    ///
+    /// TD-S0-13 changed what "converges" looks like here: once the block's
+    /// content actually matches `block`, `apply` reports `AlreadyManaged`
+    /// with `written: None` rather than re-`Replaced`-ing a byte-identical
+    /// span (previously it kept reporting `Replaced` forever, which is the
+    /// bug this row closes — that outcome could not distinguish a stale
+    /// block from a fresh one). `written: None` means "the file already
+    /// looks like `stable`", not "nothing has been written yet", so the loop
+    /// carries `current` forward across a `None` instead of unwrapping it.
     #[test]
     fn is_idempotent_across_three_forced_runs() {
         let mut current: Option<String> = None;
         let mut lengths = Vec::new();
         for _ in 0..3 {
             let (written, _) = apply(current.as_deref(), &block(), true);
-            current = written;
+            if let Some(w) = written {
+                current = Some(w);
+            }
             lengths.push(current.as_ref().unwrap().len());
         }
         assert_eq!(
@@ -379,9 +462,13 @@ mod tests {
         let stable = current.clone().unwrap();
 
         let (written, outcome) = apply(current.as_deref(), &block(), true);
-        assert!(matches!(outcome, AppendOutcome::Replaced));
+        assert!(matches!(outcome, AppendOutcome::AlreadyManaged));
+        assert!(
+            written.is_none(),
+            "no further write is needed once the block already matches"
+        );
         assert_eq!(
-            written.unwrap(),
+            current.unwrap(),
             stable,
             "forced runs must converge to identical bytes"
         );
@@ -446,6 +533,120 @@ mod tests {
                 AppendOutcome::ExistingToolchain {
                     name: "node".to_string(),
                     parsed: false,
+                },
+                "for {text}"
+            );
+        }
+    }
+
+    /// TD-S0-10: a CRLF file's trailing `\r\n` after `END` must be consumed
+    /// in full on `--force`, not just the `\n`, or a bare `\r` is left
+    /// behind as a stray blank line.
+    #[test]
+    fn force_on_a_crlf_file_consumes_the_full_line_ending() {
+        let stale = format!("{BEGIN}\r\nstale content\r\n{END}\r\n");
+        let existing = format!("before = 1\r\n{stale}after = 2\r\n");
+
+        let (written, outcome) = apply(Some(&existing), &block(), true);
+        assert!(matches!(outcome, AppendOutcome::Replaced));
+        let text = written.unwrap();
+
+        let expected = format!("before = 1\r\n{}after = 2\r\n", block());
+        assert_eq!(text, expected, "no stray blank line from a leftover \\r");
+    }
+
+    /// F1 (fix round 2): a CRLF copy of the exact same block pudu would
+    /// write today must be reported up to date, not stale — TD-S0-13's
+    /// content check must normalize line endings before comparing, or a
+    /// Windows / `core.autocrlf` checkout (where the block pudu itself
+    /// wrote comes back CRLF) reports every semantically-identical block as
+    /// outdated forever.
+    #[test]
+    fn a_crlf_copy_of_the_current_block_is_reported_up_to_date() {
+        let crlf_block = block().replace('\n', "\r\n");
+        let existing = format!("before = 1\r\n{crlf_block}after = 2\r\n");
+
+        let (written, outcome) = apply(Some(&existing), &block(), false);
+        assert!(
+            written.is_none(),
+            "a CRLF copy of the current block needs no write"
+        );
+        assert!(
+            matches!(outcome, AppendOutcome::AlreadyManaged),
+            "expected AlreadyManaged, got {outcome:?}"
+        );
+    }
+
+    /// TD-S0-12: `not_system_node_toolchain(...)` must not be mistaken for a
+    /// real `system_node_toolchain(...)` call just because the substring
+    /// `system_node_toolchain` appears inside it.
+    #[test]
+    fn similarly_prefixed_identifier_is_not_mistaken_for_the_real_toolchain() {
+        let existing = "not_system_node_toolchain(name = \"x\")\n";
+        let (written, outcome) = apply(Some(existing), &block(), false);
+        assert!(matches!(outcome, AppendOutcome::Appended));
+        assert!(written.is_some());
+    }
+
+    /// TD-S0-12 fix-round-1 regression: a bad-prefix occurrence earlier on
+    /// the same line must not shadow a real `system_node_toolchain(...)`
+    /// call later on that line. The boundary check must re-scan from past
+    /// the failed occurrence rather than skipping the rest of the line, or
+    /// pudu appends a managed block declaring a *second*
+    /// `system_node_toolchain(name = "node")`, a duplicate target that
+    /// breaks the user's Buck file.
+    #[test]
+    fn a_bad_prefix_match_does_not_shadow_a_real_call_later_on_the_same_line() {
+        let existing = "not_system_node_toolchain(x) or system_node_toolchain(name = \"node\")\n";
+        let (written, outcome) = apply(Some(existing), &block(), false);
+        assert!(
+            written.is_none(),
+            "must not write over the real toolchain call: {outcome:?}"
+        );
+        match outcome {
+            AppendOutcome::ExistingToolchain { name, .. } => assert_eq!(name, "node"),
+            other => panic!("expected ExistingToolchain, got {other:?}"),
+        }
+    }
+
+    /// TD-S0-13: a managed block whose content differs from what pudu would
+    /// write today (e.g. left by an older pudu version) must be reported
+    /// distinctly from an up-to-date block, not folded into `AlreadyManaged`.
+    #[test]
+    fn stale_block_from_an_older_pudu_is_reported_distinctly() {
+        let stale = format!(
+            "{BEGIN}\nload(\"old_label.bzl\", \"system_node_toolchain\")\n\
+             system_node_toolchain(name = \"node\")\n{END}\n"
+        );
+        let (written, outcome) = apply(Some(&stale), &block(), false);
+        assert!(written.is_none());
+        assert!(matches!(outcome, AppendOutcome::StaleManaged));
+    }
+
+    /// TD-S0-22: a target name pulled out of a hand-written
+    /// `system_node_toolchain(name = "...")` call must be validated against
+    /// Buck's target-name grammar before it is reported as parsed — an
+    /// illegal name (whitespace, an embedded `:`) must fall back to `"node"`
+    /// with `parsed: false`, the same as an unparseable name, rather than
+    /// flowing unescaped into the generated `pudu.toml`.
+    #[test]
+    fn pathological_target_names_fall_back_to_node() {
+        for text in [
+            "system_node_toolchain(name = \"my node\")\n",
+            "system_node_toolchain(name = \"bad:name\")\n",
+            // R3 fix-round-1: `.` and `..` pass the character-class check
+            // (every char in them is `.`) but Buck2 rejects both outright
+            // as target names, so they must be rejected explicitly.
+            "system_node_toolchain(name = \".\")\n",
+            "system_node_toolchain(name = \"..\")\n",
+        ] {
+            let (written, outcome) = apply(Some(text), &block(), false);
+            assert!(written.is_none());
+            assert_eq!(
+                outcome,
+                AppendOutcome::ExistingToolchain {
+                    name: "node".to_string(),
+                    parsed: false
                 },
                 "for {text}"
             );

@@ -221,6 +221,15 @@ pub enum ConfigError {
         source: std::io::Error,
     },
 
+    #[error("`third_party_dir` value {path:?} {reason}, so it cannot be a Buck label")]
+    #[diagnostic(
+        code(pudu::config::unusable_third_party_dir),
+        help(
+            "use a normalized, cell-relative path, e.g. \"third-party/js\" — not absolute, and with no `.` or `..` component"
+        )
+    )]
+    UnusableThirdPartyDir { path: PathBuf, reason: String },
+
     #[error("no platforms configured")]
     #[diagnostic(
         code(pudu::config::no_platforms),
@@ -834,7 +843,23 @@ pub enum InitWarning {
     )]
     ThirdPartyFileExists { path: PathBuf },
 
-    #[error("{path} already declares a node toolchain (`:{name}`); leaving it alone")]
+    // F3 (fix round 2): `name` is only ever a real target from the file when
+    // `parsed` is true. TD-S0-22 widened what reaches this warning with
+    // `parsed: false` (a name can now be read-but-rejected as illegal, not
+    // just unreadable), so `(`:{name}`)` unconditionally naming `name` as
+    // the declared target reads as false when it is really pudu's own
+    // fallback — the file declares no target called `node`. Mark it as
+    // assumed rather than declared when `parsed` is false; the sibling
+    // `ToolchainNameUnparsed` warning printed right after already explains
+    // why, so the pair stays honest either way.
+    #[error(
+        "{path} already declares a node toolchain{}; leaving it alone",
+        if *parsed {
+            format!(" (`:{name}`)")
+        } else {
+            format!(" (assumed `:{name}`)")
+        }
+    )]
     #[diagnostic(
         severity(Warning),
         code(pudu::init::existing_toolchain),
@@ -844,11 +869,19 @@ pub enum InitWarning {
         path: PathBuf,
         name: String,
         recorded: String,
+        parsed: bool,
     },
 
+    // Covers two distinct situations truthfully in one message (fix round
+    // 1 on TD-S0-22): the target name could not be read out of the call at
+    // all, *or* it was read but rejected as not a legal Buck target name
+    // (e.g. `"my node"`, `".."`). Both fall back to `{name}` the same way,
+    // and from the caller's side both are reported with `parsed: false`, so
+    // one variant with wording that covers both cases is simpler than a
+    // second near-identical variant.
     #[error(
-        "could not read the target name out of the `system_node_toolchain(...)` call in {path}; \
-         assumed `{name}`"
+        "could not use the target name from the `system_node_toolchain(...)` call in {path} \
+         (missing, or not a legal Buck target name); assumed `{name}`"
     )]
     #[diagnostic(
         severity(Warning),

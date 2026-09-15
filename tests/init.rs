@@ -96,6 +96,30 @@ fn force_overwrites() {
     );
 }
 
+/// TD-S0-13 fix-round-1 regression: `pudu init --force` against a workspace
+/// whose `toolchains/BUCK` block is already current must not tell the user
+/// to pass `--force` — they just did. Before TD-S0-13 this case reported
+/// `Replaced` and printed "wrote toolchains/BUCK"; after TD-S0-13 it
+/// (correctly) reports `AlreadyManaged`, but the printed message was
+/// unconditional and still said "pass --force to refresh" even on a run
+/// that was already forced.
+#[test]
+fn force_on_an_already_current_block_does_not_tell_the_user_to_pass_force() {
+    let d = workspace(true);
+    pudu(d.path()).arg("init").output().unwrap();
+    let out = pudu(d.path()).args(["init", "--force"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !stdout.contains("pass --force to refresh"),
+        "a forced run must not ask the user to pass a flag they just passed: {stdout}"
+    );
+}
+
 #[test]
 fn toolchain_append_is_idempotent() {
     let d = workspace(true);
@@ -261,6 +285,35 @@ fn non_force_run_leaves_a_stale_managed_block_alone() {
     );
 }
 
+/// F4 (fix round 2): a run that leaves a stale managed block in place must
+/// not close with the unqualified "Next: pudu vendor && pudu buckify" —
+/// a stale block can load a different `.bzl` label than the one this run
+/// computed, so `buck2 run` can fail after the user follows that advice.
+/// The closing line must tell them to refresh the block first.
+#[test]
+fn non_force_run_over_a_stale_block_tells_the_user_to_refresh_it_next() {
+    let d = workspace(true);
+    fs::create_dir_all(d.path().join("toolchains")).unwrap();
+    let stale_block = "# --- begin pudu-managed (do not edit inside this block) ---\n\
+         load(\"@root//third-party/js:toolchains.bzl\", \"system_node_toolchain\")\n\
+         system_node_toolchain(name = \"node\", visibility = [\"//:x\"])\n\
+         # --- end pudu-managed ---\n";
+    fs::write(d.path().join("toolchains/BUCK"), stale_block).unwrap();
+
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("Next: pass --force to refresh toolchains/BUCK"),
+        "the closing instruction must not send the user straight to \
+         buckify over a stale block: {stdout}"
+    );
+}
+
 /// I1: an existing user toolchain must be RECORDED in pudu.toml, under the
 /// name the file actually declares — not the hardcoded `:node` (exit
 /// criterion 5). A wrong label here becomes a reference to a nonexistent
@@ -324,7 +377,7 @@ fn unparseable_toolchain_name_falls_back_and_says_so() {
     );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("could not read the target name"),
+        stderr.contains("could not use the target name"),
         "the fallback must be announced: {stderr}"
     );
     // I4: announced as a diagnostic, not a bare `warning:` line.
@@ -333,6 +386,56 @@ fn unparseable_toolchain_name_falls_back_and_says_so() {
         "{stderr}"
     );
     assert!(!stderr.contains("warning:"), "{stderr}");
+}
+
+/// F3 (fix round 2): when the target name could not be read out of the call
+/// (or was read but rejected as illegal, TD-S0-22), the "already declares a
+/// node toolchain" warning must not claim the file declares a target called
+/// `node` — that is pudu's own fallback, not something the file contains.
+/// It must be marked as assumed instead.
+#[test]
+fn existing_toolchain_warning_marks_an_unparsed_name_as_assumed_not_declared() {
+    let d = workspace(true);
+    fs::create_dir_all(d.path().join("toolchains")).unwrap();
+    fs::write(
+        d.path().join("toolchains/BUCK"),
+        "system_node_toolchain(**MY_KWARGS)\n",
+    )
+    .unwrap();
+
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("declares a node toolchain (`:node`)"),
+        "must not claim the file declares a target that is really pudu's fallback: {stderr}"
+    );
+    assert!(
+        stderr.contains("declares a node toolchain (assumed `:node`)"),
+        "must mark the fallback name as assumed: {stderr}"
+    );
+}
+
+/// The counterpart: when the name *was* actually read out of the call, the
+/// warning must still name it as declared, not assumed.
+#[test]
+fn existing_toolchain_warning_names_a_parsed_target_as_declared_not_assumed() {
+    let d = workspace(true);
+    fs::create_dir_all(d.path().join("toolchains")).unwrap();
+    fs::write(
+        d.path().join("toolchains/BUCK"),
+        "system_node_toolchain(name = \"my_node\")\n",
+    )
+    .unwrap();
+
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("declares a node toolchain (`:my_node`)"),
+        "a genuinely parsed name must still be reported as declared: {stderr}"
+    );
+    assert!(!stderr.contains("assumed `:my_node`"), "{stderr}");
 }
 
 /// I8: the `@root//` load label is anchored at the Buck cell root, not at
@@ -486,4 +589,56 @@ fn success_path_warnings_render_as_diagnostics() {
         stderr.contains("pudu::init::win32_skipped"),
         "the diagnostic code must be shown:\n{stderr}"
     );
+}
+
+/// TD-S0-24: if `toolchains/BUCK` can't be written, `pudu.toml` must not be
+/// left on disk either — otherwise a bare re-run of `pudu init` hits the
+/// "already exists" guard before it ever gets a chance to retry the write
+/// that actually failed, and the user is pointed at `--force` to recover
+/// from pudu's own partial write instead of just re-running `init`.
+///
+/// `toolchains` is pre-created as a normal, empty, *writable* directory —
+/// so `read_to_string(toolchains/BUCK)` reports plain `NotFound` (existing
+/// content is `None`) exactly as it would on a totally fresh run — and then
+/// stripped of write permission, so only the later
+/// `std::fs::write(&tc_path, ...)` step fails. That isolates the write-order
+/// bug from the (already-correct) early read, which would otherwise abort
+/// the run before either write is attempted and make this test pass
+/// regardless of the fix.
+#[cfg(unix)]
+#[test]
+fn a_failed_toolchains_buck_write_leaves_no_pudu_toml_and_a_bare_rerun_succeeds() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let d = workspace(true);
+    let tc_dir = d.path().join("toolchains");
+    fs::create_dir_all(&tc_dir).unwrap();
+    fs::set_permissions(&tc_dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let out = pudu(d.path()).arg("init").output().unwrap();
+
+    // Restore write permission before any assertion can fail the test and
+    // skip cleanup, which would otherwise leave an unwritable directory in
+    // the tempdir's drop path.
+    fs::set_permissions(&tc_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        !out.status.success(),
+        "init must fail when toolchains/BUCK cannot be written: {out:?}"
+    );
+    assert!(
+        !d.path().join("pudu.toml").exists(),
+        "pudu.toml must not be left behind by a run that failed to finish scaffolding"
+    );
+
+    // Retry *without* --force: the previous run must not have left any
+    // sentinel that routes recovery through --force.
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(
+        out.status.success(),
+        "a bare re-run must succeed once the obstruction is gone: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(d.path().join("pudu.toml").exists());
+    assert!(d.path().join("toolchains/BUCK").exists());
 }

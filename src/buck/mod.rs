@@ -11,7 +11,7 @@ pub mod format;
 pub mod store;
 
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::config::Platform;
 use crate::error::BuckError;
@@ -152,42 +152,15 @@ pub fn generate(
 
 /// `third_party_dir` as a Buck label path, or the reason it cannot be one.
 ///
-/// A Buck label is a normalized path relative to the cell root: not
-/// absolute, non-empty, and with every component an ordinary name — no `.`,
-/// no `..`, and no empty component (what a leading, trailing or doubled `/`
-/// produces). `is_absolute()` alone catches only one of these; the others
-/// still produce a path buck2's parser rejects (`./third-party/js`,
-/// `third-party/js/`, `../shared/tp`), just later and with a worse error.
+/// The predicate itself lives in [`crate::config::third_party_dir_label`] —
+/// `third_party_dir` is a config field, and `buck` already depends on
+/// `config` types rather than the reverse. `Config::validate` runs this same
+/// check so `pudu init` and `pudu config check` catch an unusable
+/// `third_party_dir` before any file is written; this call stays as defense
+/// in depth, since `buck::generate` must not assume validation ran (both
+/// `load_lenient` and `load_validated` exist).
 fn normalized_label(path: &Path) -> Result<String, String> {
-    if path.as_os_str().is_empty() {
-        return Err("is empty".to_string());
-    }
-    if path.is_absolute() {
-        return Err("is an absolute path".to_string());
-    }
-
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
-            Component::CurDir => return Err("contains a `.` component".to_string()),
-            Component::ParentDir => return Err("contains a `..` component".to_string()),
-            Component::RootDir | Component::Prefix(_) => {
-                return Err("is an absolute path".to_string());
-            }
-        }
-    }
-    if parts.is_empty() {
-        return Err("is empty".to_string());
-    }
-
-    // Buck labels are slash-separated regardless of host separator.
-    let normalized = parts.join("/");
-    let raw = path.to_string_lossy().replace('\\', "/");
-    if raw != normalized {
-        return Err("is not a normalized path (a leading, trailing or doubled `/`)".to_string());
-    }
-    Ok(normalized)
+    crate::config::third_party_dir_label(path)
 }
 
 #[cfg(test)]

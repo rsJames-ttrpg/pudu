@@ -50,9 +50,36 @@ impl RawVersion {
     fn normalize(&self) -> String {
         match self {
             Self::Str(s) => s.clone(),
-            // `9.0` parses as a float; render it back to the lockfile's own
-            // one-decimal spelling rather than "9".
-            Self::Num(n) => format!("{n:.1}"),
+            // `9.0` parses as a float. A fixed one-decimal format
+            // (`format!("{n:.1}")`) truncates a value like `9.12` to "9.1",
+            // misreporting the actual unsupported version to the user.
+            // `Display` prints the minimal digits needed instead — but for
+            // a whole number it drops the decimal point entirely (`9.0`
+            // becomes "9"), which would make a legitimately-supported bare
+            // `lockfileVersion: 9.0` compare unequal to `SUPPORTED_VERSION`
+            // ("9.0") and get rejected as unsupported. So: use the minimal
+            // `Display` form, but restore a trailing ".0" when it has no
+            // decimal point at all.
+            //
+            // F2 (fix round 2): that ".0" restoration must not apply to a
+            // non-finite value. `Display` on `f64::NAN`/`INFINITY` prints
+            // "NaN"/"inf" (no '.'), and blindly appending ".0" produced
+            // "NaN.0" / "inf.0" — strings that appear nowhere in the
+            // lockfile, which is worse than the old `{n:.1}` behavior this
+            // fixup replaced (that at least printed the honest "NaN"/
+            // "inf"). `1e30` also has no '.', but restoring nonfinite-only
+            // still leaves its 31-digit `Display` form unabbreviated; that
+            // is unrelated to F2 (rejection is still correct either way)
+            // and out of scope here — F2 is only about not naming a
+            // version string the file does not contain.
+            Self::Num(n) => {
+                let s = format!("{n}");
+                if !n.is_finite() || s.contains('.') {
+                    s
+                } else {
+                    format!("{s}.0")
+                }
+            }
         }
     }
 }
@@ -94,10 +121,12 @@ pub fn parse_lockfile(text: &str, path: &Path) -> Result<(Lockfile, Vec<LockWarn
         return Err(LockError::PatchedDependencies);
     }
 
-    let lockfile: Lockfile = serde_norway::from_str(text).map_err(|source| LockError::Yaml {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut lockfile: Lockfile =
+        serde_norway::from_str(text).map_err(|source| LockError::Yaml {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    lockfile.lockfile_version = found.expect("gated to Some(SUPPORTED_VERSION) above");
 
     if lockfile.settings.exclude_links_from_lockfile {
         return Err(LockError::ExcludedLinks);
@@ -148,6 +177,101 @@ mod tests {
     fn accepts_quoted_and_unquoted_version() {
         assert!(parse(MINIMAL).is_ok());
         assert!(parse("lockfileVersion: 9.0\nimporters: {}\n").is_ok());
+    }
+
+    /// TD-S1-08: `Lockfile::lockfile_version` must carry the version
+    /// `parse_lockfile` actually observed, not merely default to it — the
+    /// struct's `#[serde(skip)]` field defaults to `""`, so this test would
+    /// fail (empty string) if `parse_lockfile` ever stopped setting it.
+    #[test]
+    fn parsed_lockfile_reports_the_version_it_observed() {
+        let (quoted, _) = parse(MINIMAL).unwrap();
+        assert_eq!(quoted.lockfile_version, "9.0");
+
+        let (bare, _) = parse("lockfileVersion: 9.0\nimporters: {}\n").unwrap();
+        assert_eq!(bare.lockfile_version, "9.0");
+    }
+
+    /// TD-S1-02: a bare-numeric `lockfileVersion` must not be truncated to
+    /// one decimal when rendered into an error message. `9.10` is not a
+    /// useful example here — it parses to the same f64 as `9.1`, so
+    /// truncation loses nothing for that specific input. `9.12` does show
+    /// the bug: `format!("{n:.1}")` would round it to "9.1", misreporting
+    /// the version actually found.
+    #[test]
+    fn a_bare_numeric_version_is_not_truncated_to_one_decimal() {
+        assert_eq!(RawVersion::Num(9.12).normalize(), "9.12");
+    }
+
+    /// The counterpart to the above: a whole-number bare version must still
+    /// render with its decimal point, so it compares equal to
+    /// `SUPPORTED_VERSION` ("9.0") rather than becoming "9" and being
+    /// rejected as unsupported.
+    #[test]
+    fn a_whole_number_bare_version_keeps_its_decimal_point() {
+        assert_eq!(RawVersion::Num(9.0).normalize(), "9.0");
+    }
+
+    /// F2 (fix round 2): the ".0" restoration above exists only to keep a
+    /// legitimate whole-number version (`9.0`) comparing equal to
+    /// `SUPPORTED_VERSION`. Applied to a non-finite value it instead
+    /// glues ".0" onto `Display`'s "NaN"/"inf", producing a version string
+    /// ("NaN.0", "inf.0") that appears nowhere in the lockfile — worse
+    /// than the honest (if imprecise) "NaN"/"inf" the old `{n:.1}`
+    /// formatting produced. Neither is a real pnpm lockfileVersion, so
+    /// rejection is correct either way; only the message text is at stake.
+    #[test]
+    fn a_non_finite_bare_version_is_not_given_a_fabricated_decimal_point() {
+        assert_eq!(RawVersion::Num(f64::NAN).normalize(), "NaN");
+        assert_eq!(RawVersion::Num(f64::INFINITY).normalize(), "inf");
+        assert_eq!(RawVersion::Num(f64::NEG_INFINITY).normalize(), "-inf");
+    }
+
+    /// The end-to-end counterpart: a lockfile whose `lockfileVersion` is a
+    /// YAML `.nan`/`.inf` special float must be rejected with a message
+    /// naming what pnpm-lock.yaml actually contains, not a string with a
+    /// fabricated ".0" that appears nowhere in the file.
+    #[test]
+    fn a_lockfile_with_a_non_finite_version_is_rejected_without_a_fabricated_version_string() {
+        for (src_version, must_not_contain) in [(".nan", "NaN.0"), (".inf", "inf.0")] {
+            let src = format!("lockfileVersion: {src_version}\nimporters: {{}}\n");
+            let err = parse(&src).expect_err("a non-finite version must be rejected");
+            let msg = format!("{err}");
+            assert!(
+                !msg.contains(must_not_contain),
+                "must not name a version string absent from the file: {msg}"
+            );
+        }
+    }
+
+    /// The old `format!("{n:.1}")` did not merely truncate when *reporting* a
+    /// version — it rounded, and `normalize()` feeds the supported-version
+    /// comparison itself. So `8.96`, `9.04` and `9.0499` all became "9.0" and
+    /// were accepted as a supported v9.0 lockfile, silently, on a value pudu
+    /// has never been tested against. That is the more serious half of
+    /// TD-S1-02 and it went unrecorded by the row, so it is pinned here
+    /// rather than left to the two tests that only cover the message text.
+    #[test]
+    fn a_near_miss_bare_version_is_not_rounded_into_the_supported_one() {
+        for near in ["8.96", "9.04", "9.0499"] {
+            let src = format!("lockfileVersion: {near}\nimporters: {{}}\n");
+            let err = parse(&src).expect_err("a near-miss version must not be accepted as 9.0");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(near),
+                "{near} must be rejected and named, not rounded to 9.0: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unsupported_bare_numeric_version_names_itself_precisely() {
+        let err = parse("lockfileVersion: 9.12\nimporters: {}\n").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("9.12"),
+            "must name the version actually found, not a truncated one: {msg}"
+        );
     }
 
     #[test]

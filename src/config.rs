@@ -4,7 +4,7 @@
 //! [`Config::validate`] (Task 4).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 use url::Url;
@@ -246,6 +246,13 @@ impl Config {
             errors.push(ConfigError::LockfileNotFound { path: lockfile });
         }
 
+        if let Err(reason) = third_party_dir_label(&self.third_party_dir) {
+            errors.push(ConfigError::UnusableThirdPartyDir {
+                path: self.third_party_dir.clone(),
+                reason,
+            });
+        }
+
         let tpd = base_dir.join(&self.third_party_dir);
         if let Err(source) = check_writable(&tpd, base_dir) {
             errors.push(ConfigError::ThirdPartyDirNotWritable { path: tpd, source });
@@ -366,6 +373,54 @@ fn check_writable(dir: &Path, base_dir: &Path) -> std::io::Result<()> {
         .prefix(".pudu-write-probe")
         .tempfile_in(target)
         .map(|_| ())
+}
+
+/// `third_party_dir` as a Buck label path, or the reason it cannot be one.
+///
+/// A Buck label is a normalized path relative to the cell root: not
+/// absolute, non-empty, and with every component an ordinary name — no `.`,
+/// no `..`, and no empty component (what a leading, trailing or doubled `/`
+/// produces). `is_absolute()` alone catches only one of these; the others
+/// still produce a path buck2's parser rejects (`./third-party/js`,
+/// `third-party/js/`, `../shared/tp`), just later and with a worse error.
+///
+/// This lives here, not in `buck`, because `third_party_dir` is a config
+/// field: its legality is a question `Config::validate` should be able to
+/// answer before any file is written, and `buck` already depends on `config`
+/// types (not the reverse) — `buck::generate` calls this function, not the
+/// other way around, and keeps its own check as defense in depth against a
+/// caller that skipped validation (`load_lenient` exists alongside
+/// `load_validated`).
+pub(crate) fn third_party_dir_label(path: &Path) -> std::result::Result<String, String> {
+    if path.as_os_str().is_empty() {
+        return Err("is empty".to_string());
+    }
+    if path.is_absolute() {
+        return Err("is an absolute path".to_string());
+    }
+
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::CurDir => return Err("contains a `.` component".to_string()),
+            Component::ParentDir => return Err("contains a `..` component".to_string()),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err("is an absolute path".to_string());
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err("is empty".to_string());
+    }
+
+    // Buck labels are slash-separated regardless of host separator.
+    let normalized = parts.join("/");
+    let raw = path.to_string_lossy().replace('\\', "/");
+    if raw != normalized {
+        return Err("is not a normalized path (a leading, trailing or doubled `/`)".to_string());
+    }
+    Ok(normalized)
 }
 
 /// A Buck target label: `cell//path:target` or `//path:target`.
@@ -787,6 +842,49 @@ registry_rev = "deadbeef"
             "validate() must not create third_party_dir or its ancestors"
         );
         assert!(!tpd.join("js").exists());
+    }
+
+    /// TD-S4-03: `pudu config check` must reject every `third_party_dir`
+    /// shape that can never produce a valid Buck label, not just leave that
+    /// to `pudu buckify`. Mirrors the four cases `buck::normalized_label`
+    /// rejects (now shared via `third_party_dir_label`).
+    #[test]
+    fn rejects_unusable_third_party_dir_shapes() {
+        let d = tempdir_with_lockfile();
+        for third_party_dir in [
+            "/tmp/pudu-td-s4-03-absolute",
+            "",
+            ".",
+            "..",
+            "third-party/js/",
+        ] {
+            let c = cfg(&format!(
+                "lockfile_path=\"pnpm-lock.yaml\"\nthird_party_dir=\"{third_party_dir}\"\n[platforms.a]\nos=\"linux\"\ncpu=\"x64\"\n"
+            ));
+            let (errors, _) = c.validate(d.path());
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ConfigError::UnusableThirdPartyDir { .. })),
+                "third_party_dir {third_party_dir:?} should be rejected, got {errors:?}"
+            );
+        }
+    }
+
+    /// A normal, cell-relative `third_party_dir` must not trip the new
+    /// check — this is the counterpart to
+    /// `rejects_unusable_third_party_dir_shapes`, proving it is not
+    /// over-broad.
+    #[test]
+    fn accepts_a_normalized_relative_third_party_dir() {
+        let d = tempdir_with_lockfile();
+        let (errors, _) = cfg(GOOD).validate(d.path());
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::UnusableThirdPartyDir { .. })),
+            "{errors:?}"
+        );
     }
 
     /// M7: the ancestor walk must stop before the filesystem root. Probing

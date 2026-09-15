@@ -14,6 +14,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Lockfile {
+    /// The `lockfileVersion` actually observed in the parsed file,
+    /// normalized (e.g. `"9.0"`). Not deserialized from the `lockfileVersion`
+    /// key directly — `parse_lockfile` already gates that value against
+    /// [`crate::lock::SUPPORTED_VERSION`] on a separate `Probe` before the
+    /// full `Lockfile` deserialize, and a bare-numeric YAML version would
+    /// not deserialize cleanly into a `String` field anyway — so this is
+    /// populated after the fact by `parse_lockfile` from the value it
+    /// already computed. `#[serde(skip)]` keeps it out of the derived
+    /// (de)serialization entirely; it is always `String::default()` (empty)
+    /// immediately after `serde` builds a `Lockfile`, until `parse_lockfile`
+    /// sets it.
+    #[serde(skip)]
+    pub lockfile_version: String,
     #[serde(default)]
     pub settings: Settings,
     #[serde(default)]

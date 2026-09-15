@@ -474,8 +474,12 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
     // refreshed; see toolchain::apply.
     //
     // Computed *before* pudu.toml is written, because the outcome decides
-    // which `[buck] node_toolchain` label the config must record (I1); the
-    // write itself is deferred so the "wrote ..." lines stay in file order.
+    // which `[buck] node_toolchain` label the config must record (I1). The
+    // write itself is deferred until after third-party/js/* is written
+    // (TD-S0-24): pudu.toml is written last of all three artifact groups,
+    // so its existence stays a reliable "init fully completed" sentinel —
+    // the actual write order is third-party/js/* -> toolchains/BUCK ->
+    // pudu.toml, and the "wrote ..." lines follow that same order.
     let tc_dir = root.join("toolchains");
     let tc_path = tc_dir.join("BUCK");
     let existing = match std::fs::read_to_string(&tc_path) {
@@ -492,20 +496,6 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
         AppendOutcome::ExistingToolchain { name, .. } => format!("toolchains//:{name}"),
         _ => crate::config::default_node_toolchain(),
     };
-
-    // pudu.toml
-    std::fs::write(
-        &config_path,
-        render_config(
-            &lockfile_rel,
-            &third_party_rel,
-            &node_toolchain,
-            &derived.platforms,
-            found.is_some(),
-        ),
-    )
-    .with_context(|| format!("cannot write {}", config_path.display()))?;
-    println!("wrote {}", config_path.display());
 
     // third-party/js skeleton. `--force` governs pudu.toml and the
     // toolchains/BUCK managed block only (spec, commit f4c5b0c). The
@@ -552,10 +542,38 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
             println!("wrote {}", tc_path.display());
         }
         AppendOutcome::AlreadyManaged => {
+            if force {
+                // TD-S0-13 made force-over-an-already-current-block report
+                // AlreadyManaged (nothing to do) instead of re-Replacing a
+                // byte-identical block. This arm printed an unconditional
+                // "pass --force to refresh" before that change, which is
+                // false on a run that already passed --force and did
+                // nothing because the block was already current.
+                println!(
+                    "{} already has an up-to-date pudu-managed block; nothing to do",
+                    tc_path.display()
+                );
+            } else {
+                println!(
+                    "{} already has a pudu-managed block (pass --force to refresh)",
+                    tc_path.display()
+                );
+            }
+        }
+        AppendOutcome::StaleManaged => {
             println!(
-                "{} already has a pudu-managed block (pass --force to refresh)",
+                "{} has an outdated pudu-managed block (pass --force to refresh)",
                 tc_path.display()
             );
+            // F4 (fix round 2): an outdated block can load a different
+            // `.bzl` label than the one this run computed, so `buck2 run`
+            // can fail after the user follows the unqualified "Next: pudu
+            // vendor && pudu buckify" advice the other arms fall through
+            // to. The "pass --force to refresh" line above already says
+            // what to do; the closing "Next:" line must say so too rather
+            // than implying the scaffold is ready to build as-is.
+            next_steps =
+                "pass --force to refresh toolchains/BUCK, then pudu vendor && pudu buckify";
         }
         AppendOutcome::ExistingToolchain { name, parsed } => {
             eprint!(
@@ -564,6 +582,7 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
                     path: tc_path.clone(),
                     name: name.clone(),
                     recorded: node_toolchain.clone(),
+                    parsed,
                 })
             );
             if !parsed {
@@ -591,6 +610,27 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
             next_steps = "add the block above to toolchains/BUCK, then pudu vendor && pudu buckify";
         }
     }
+
+    // pudu.toml is written last, after every write that can fail
+    // independently (third-party/js/*, toolchains/BUCK) has already
+    // succeeded (TD-S0-24). `config_path.exists()` is the guard a re-run
+    // without `--force` checks at the top of this function, so writing it
+    // last keeps that check meaning "init fully completed" rather than
+    // "init got partway through and then failed" — a partial failure here
+    // leaves nothing on disk that routes a retry into `--force` territory
+    // it does not actually need.
+    std::fs::write(
+        &config_path,
+        render_config(
+            &lockfile_rel,
+            &third_party_rel,
+            &node_toolchain,
+            &derived.platforms,
+            found.is_some(),
+        ),
+    )
+    .with_context(|| format!("cannot write {}", config_path.display()))?;
+    println!("wrote {}", config_path.display());
 
     if found.is_none() {
         println!("\nNext: edit `lockfile_path` in pudu.toml, then pudu config check");
