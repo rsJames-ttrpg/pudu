@@ -199,7 +199,23 @@ pub fn apply(existing: Option<&str>, block: &str, force: bool) -> (Option<String
                 tail += 1;
             }
             let current_block = &text[b..tail];
-            if current_block == block {
+            // F1 (fix round 2): `block` is always LF-only (`managed_block`
+            // never emits a carriage return), but on a Windows /
+            // `core.autocrlf` checkout the block pudu itself wrote comes
+            // back CRLF. Byte equality would then never match a
+            // semantically-identical block, reporting it stale forever
+            // and, on `--force`, splicing an LF-only block into a CRLF
+            // file (mixed endings) that a later checkout renormalizes
+            // right back to CRLF — recurring "outdated" reports with no
+            // way to actually reach "up to date". Normalize CRLF to LF on
+            // the existing side only (`block` never has a CR to
+            // normalize) before comparing.
+            let normalized_current = if current_block.contains('\r') {
+                std::borrow::Cow::Owned(current_block.replace("\r\n", "\n"))
+            } else {
+                std::borrow::Cow::Borrowed(current_block)
+            };
+            if normalized_current == block {
                 return (None, AppendOutcome::AlreadyManaged);
             }
             if !force {
@@ -537,6 +553,28 @@ mod tests {
 
         let expected = format!("before = 1\r\n{}after = 2\r\n", block());
         assert_eq!(text, expected, "no stray blank line from a leftover \\r");
+    }
+
+    /// F1 (fix round 2): a CRLF copy of the exact same block pudu would
+    /// write today must be reported up to date, not stale — TD-S0-13's
+    /// content check must normalize line endings before comparing, or a
+    /// Windows / `core.autocrlf` checkout (where the block pudu itself
+    /// wrote comes back CRLF) reports every semantically-identical block as
+    /// outdated forever.
+    #[test]
+    fn a_crlf_copy_of_the_current_block_is_reported_up_to_date() {
+        let crlf_block = block().replace('\n', "\r\n");
+        let existing = format!("before = 1\r\n{crlf_block}after = 2\r\n");
+
+        let (written, outcome) = apply(Some(&existing), &block(), false);
+        assert!(
+            written.is_none(),
+            "a CRLF copy of the current block needs no write"
+        );
+        assert!(
+            matches!(outcome, AppendOutcome::AlreadyManaged),
+            "expected AlreadyManaged, got {outcome:?}"
+        );
     }
 
     /// TD-S0-12: `not_system_node_toolchain(...)` must not be mistaken for a
