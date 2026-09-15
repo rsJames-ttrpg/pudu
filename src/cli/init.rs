@@ -565,6 +565,15 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
                 "{} has an outdated pudu-managed block (pass --force to refresh)",
                 tc_path.display()
             );
+            // F4 (fix round 2): an outdated block can load a different
+            // `.bzl` label than the one this run computed, so `buck2 run`
+            // can fail after the user follows the unqualified "Next: pudu
+            // vendor && pudu buckify" advice the other arms fall through
+            // to. The "pass --force to refresh" line above already says
+            // what to do; the closing "Next:" line must say so too rather
+            // than implying the scaffold is ready to build as-is.
+            next_steps =
+                "pass --force to refresh toolchains/BUCK, then pudu vendor && pudu buckify";
         }
         AppendOutcome::ExistingToolchain { name, parsed } => {
             eprint!(

@@ -285,6 +285,35 @@ fn non_force_run_leaves_a_stale_managed_block_alone() {
     );
 }
 
+/// F4 (fix round 2): a run that leaves a stale managed block in place must
+/// not close with the unqualified "Next: pudu vendor && pudu buckify" —
+/// a stale block can load a different `.bzl` label than the one this run
+/// computed, so `buck2 run` can fail after the user follows that advice.
+/// The closing line must tell them to refresh the block first.
+#[test]
+fn non_force_run_over_a_stale_block_tells_the_user_to_refresh_it_next() {
+    let d = workspace(true);
+    fs::create_dir_all(d.path().join("toolchains")).unwrap();
+    let stale_block = "# --- begin pudu-managed (do not edit inside this block) ---\n\
+         load(\"@root//third-party/js:toolchains.bzl\", \"system_node_toolchain\")\n\
+         system_node_toolchain(name = \"node\", visibility = [\"//:x\"])\n\
+         # --- end pudu-managed ---\n";
+    fs::write(d.path().join("toolchains/BUCK"), stale_block).unwrap();
+
+    let out = pudu(d.path()).arg("init").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("Next: pass --force to refresh toolchains/BUCK"),
+        "the closing instruction must not send the user straight to \
+         buckify over a stale block: {stdout}"
+    );
+}
+
 /// I1: an existing user toolchain must be RECORDED in pudu.toml, under the
 /// name the file actually declares — not the hardcoded `:node` (exit
 /// criterion 5). A wrong label here becomes a reference to a nonexistent
