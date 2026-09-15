@@ -430,6 +430,14 @@ fn the_pure_js_fixture_emits_stable_output() {
 /// Runs `buckify` with `third_party_dir` set to `raw` and asserts it is
 /// rejected as `InputInvalid` (exit 3) with the `unusable_third_party_dir`
 /// diagnostic code, and that nothing is written.
+///
+/// TD-S4-03: this check now lives in `Config::validate`
+/// (`pudu::config::unusable_third_party_dir`), which `buckify` runs via
+/// `load_validated()` before ever reaching `buck::generate`'s own
+/// `pudu::buckify::unusable_third_party_dir` defense-in-depth check — so the
+/// diagnostic observed here originates one layer earlier than it used to.
+/// The exit code (3, `InputInvalid`) and "nothing written" guarantee are
+/// unchanged.
 fn assert_third_party_dir_rejected(raw: &str) {
     let dir = tempfile::tempdir().unwrap();
     let config = format!(
@@ -451,7 +459,7 @@ fn assert_third_party_dir_rejected(raw: &str) {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("pudu::buckify::unusable_third_party_dir"),
+        stderr.contains("pudu::config::unusable_third_party_dir"),
         "for `{raw}`: {stderr}"
     );
 

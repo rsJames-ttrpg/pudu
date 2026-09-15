@@ -221,6 +221,15 @@ pub enum ConfigError {
         source: std::io::Error,
     },
 
+    #[error("`third_party_dir` value {path:?} {reason}, so it cannot be a Buck label")]
+    #[diagnostic(
+        code(pudu::config::unusable_third_party_dir),
+        help(
+            "use a normalized, cell-relative path, e.g. \"third-party/js\" — not absolute, and with no `.` or `..` component"
+        )
+    )]
+    UnusableThirdPartyDir { path: PathBuf, reason: String },
+
     #[error("no platforms configured")]
     #[diagnostic(
         code(pudu::config::no_platforms),
