@@ -474,8 +474,12 @@ pub fn run(force: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
     // refreshed; see toolchain::apply.
     //
     // Computed *before* pudu.toml is written, because the outcome decides
-    // which `[buck] node_toolchain` label the config must record (I1); the
-    // write itself is deferred so the "wrote ..." lines stay in file order.
+    // which `[buck] node_toolchain` label the config must record (I1). The
+    // write itself is deferred until after third-party/js/* is written
+    // (TD-S0-24): pudu.toml is written last of all three artifact groups,
+    // so its existence stays a reliable "init fully completed" sentinel —
+    // the actual write order is third-party/js/* -> toolchains/BUCK ->
+    // pudu.toml, and the "wrote ..." lines follow that same order.
     let tc_dir = root.join("toolchains");
     let tc_path = tc_dir.join("BUCK");
     let existing = match std::fs::read_to_string(&tc_path) {

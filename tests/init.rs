@@ -348,7 +348,7 @@ fn unparseable_toolchain_name_falls_back_and_says_so() {
     );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("could not read the target name"),
+        stderr.contains("could not use the target name"),
         "the fallback must be announced: {stderr}"
     );
     // I4: announced as a diagnostic, not a bare `warning:` line.

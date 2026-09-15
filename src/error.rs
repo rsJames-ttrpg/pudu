@@ -855,9 +855,16 @@ pub enum InitWarning {
         recorded: String,
     },
 
+    // Covers two distinct situations truthfully in one message (fix round
+    // 1 on TD-S0-22): the target name could not be read out of the call at
+    // all, *or* it was read but rejected as not a legal Buck target name
+    // (e.g. `"my node"`, `".."`). Both fall back to `{name}` the same way,
+    // and from the caller's side both are reported with `parsed: false`, so
+    // one variant with wording that covers both cases is simpler than a
+    // second near-identical variant.
     #[error(
-        "could not read the target name out of the `system_node_toolchain(...)` call in {path}; \
-         assumed `{name}`"
+        "could not use the target name from the `system_node_toolchain(...)` call in {path} \
+         (missing, or not a legal Buck target name); assumed `{name}`"
     )]
     #[diagnostic(
         severity(Warning),

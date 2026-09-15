@@ -124,8 +124,21 @@ fn line_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
 /// shape (whitespace, `:`, `"`, `/`) — or produce a label
 /// `config::is_buck_label` would nonetheless accept — must be rejected here
 /// rather than risk a corrupt or misleading generated config.
+///
+/// `/` is rejected even though Buck2 itself permits it in a target name
+/// (e.g. `node/v20`) — a false negative here only costs one printed
+/// fallback-to-`"node"` line, so this deliberately stays conservative
+/// rather than widening the accepted set late in a tech-debt cleardown; see
+/// TD-S0-22 fix-round-1 notes.
+///
+/// `.` and `..` are rejected explicitly even though every character in them
+/// individually passes the character-class check below: Buck2 rejects
+/// both as target names outright, and letting either through would produce
+/// a label like `toolchains//:..`.
 fn is_valid_buck_target_name(s: &str) -> bool {
     !s.is_empty()
+        && s != "."
+        && s != ".."
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "_-.+".contains(c))
 }
@@ -583,6 +596,11 @@ mod tests {
         for text in [
             "system_node_toolchain(name = \"my node\")\n",
             "system_node_toolchain(name = \"bad:name\")\n",
+            // R3 fix-round-1: `.` and `..` pass the character-class check
+            // (every char in them is `.`) but Buck2 rejects both outright
+            // as target names, so they must be rejected explicitly.
+            "system_node_toolchain(name = \".\")\n",
+            "system_node_toolchain(name = \"..\")\n",
         ] {
             let (written, outcome) = apply(Some(text), &block(), false);
             assert!(written.is_none());
