@@ -88,8 +88,8 @@ fn existing_node_toolchain(text: &str) -> Option<(String, bool)> {
             None => rest,
         };
         return Some(match parse_name_argument(args) {
-            Some(name) => (name, true),
-            None => ("node".to_string(), false),
+            Some(name) if is_valid_buck_target_name(&name) => (name, true),
+            _ => ("node".to_string(), false),
         });
     }
     None
@@ -103,6 +103,20 @@ fn line_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
         offset += raw.len();
         (start, raw.trim_end_matches(['\n', '\r']))
     })
+}
+
+/// Is `s` a legal Buck target name?
+///
+/// Deliberately conservative and stricter than Buck's actual grammar: the
+/// name goes straight into a Buck label interpolated unescaped into
+/// `pudu.toml` (TD-S0-22), so anything that could break out of that label
+/// shape (whitespace, `:`, `"`, `/`) — or produce a label
+/// `config::is_buck_label` would nonetheless accept — must be rejected here
+/// rather than risk a corrupt or misleading generated config.
+fn is_valid_buck_target_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-.+".contains(c))
 }
 
 /// Pull `"..."` out of a `name = "..."` keyword argument.
@@ -524,6 +538,31 @@ mod tests {
         let (written, outcome) = apply(Some(&stale), &block(), false);
         assert!(written.is_none());
         assert!(matches!(outcome, AppendOutcome::StaleManaged));
+    }
+
+    /// TD-S0-22: a target name pulled out of a hand-written
+    /// `system_node_toolchain(name = "...")` call must be validated against
+    /// Buck's target-name grammar before it is reported as parsed — an
+    /// illegal name (whitespace, an embedded `:`) must fall back to `"node"`
+    /// with `parsed: false`, the same as an unparseable name, rather than
+    /// flowing unescaped into the generated `pudu.toml`.
+    #[test]
+    fn pathological_target_names_fall_back_to_node() {
+        for text in [
+            "system_node_toolchain(name = \"my node\")\n",
+            "system_node_toolchain(name = \"bad:name\")\n",
+        ] {
+            let (written, outcome) = apply(Some(text), &block(), false);
+            assert!(written.is_none());
+            assert_eq!(
+                outcome,
+                AppendOutcome::ExistingToolchain {
+                    name: "node".to_string(),
+                    parsed: false
+                },
+                "for {text}"
+            );
+        }
     }
 
     #[test]
