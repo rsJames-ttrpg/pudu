@@ -63,6 +63,13 @@ fn existing_node_toolchain(text: &str) -> Option<(String, bool)> {
         let Some(idx) = line.find(NAME) else {
             continue;
         };
+        let before_is_boundary = line[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        if !before_is_boundary {
+            continue;
+        }
         let after = &line[idx + NAME.len()..];
         if !after.trim_start().starts_with('(') {
             continue;
@@ -468,6 +475,17 @@ mod tests {
 
         let expected = format!("before = 1\r\n{}after = 2\r\n", block());
         assert_eq!(text, expected, "no stray blank line from a leftover \\r");
+    }
+
+    /// TD-S0-12: `not_system_node_toolchain(...)` must not be mistaken for a
+    /// real `system_node_toolchain(...)` call just because the substring
+    /// `system_node_toolchain` appears inside it.
+    #[test]
+    fn similarly_prefixed_identifier_is_not_mistaken_for_the_real_toolchain() {
+        let existing = "not_system_node_toolchain(name = \"x\")\n";
+        let (written, outcome) = apply(Some(existing), &block(), false);
+        assert!(matches!(outcome, AppendOutcome::Appended));
+        assert!(written.is_some());
     }
 
     #[test]
