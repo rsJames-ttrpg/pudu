@@ -60,9 +60,25 @@ impl RawVersion {
             // ("9.0") and get rejected as unsupported. So: use the minimal
             // `Display` form, but restore a trailing ".0" when it has no
             // decimal point at all.
+            //
+            // F2 (fix round 2): that ".0" restoration must not apply to a
+            // non-finite value. `Display` on `f64::NAN`/`INFINITY` prints
+            // "NaN"/"inf" (no '.'), and blindly appending ".0" produced
+            // "NaN.0" / "inf.0" — strings that appear nowhere in the
+            // lockfile, which is worse than the old `{n:.1}` behavior this
+            // fixup replaced (that at least printed the honest "NaN"/
+            // "inf"). `1e30` also has no '.', but restoring nonfinite-only
+            // still leaves its 31-digit `Display` form unabbreviated; that
+            // is unrelated to F2 (rejection is still correct either way)
+            // and out of scope here — F2 is only about not naming a
+            // version string the file does not contain.
             Self::Num(n) => {
                 let s = format!("{n}");
-                if s.contains('.') { s } else { format!("{s}.0") }
+                if !n.is_finite() || s.contains('.') {
+                    s
+                } else {
+                    format!("{s}.0")
+                }
             }
         }
     }
@@ -194,6 +210,38 @@ mod tests {
     #[test]
     fn a_whole_number_bare_version_keeps_its_decimal_point() {
         assert_eq!(RawVersion::Num(9.0).normalize(), "9.0");
+    }
+
+    /// F2 (fix round 2): the ".0" restoration above exists only to keep a
+    /// legitimate whole-number version (`9.0`) comparing equal to
+    /// `SUPPORTED_VERSION`. Applied to a non-finite value it instead
+    /// glues ".0" onto `Display`'s "NaN"/"inf", producing a version string
+    /// ("NaN.0", "inf.0") that appears nowhere in the lockfile — worse
+    /// than the honest (if imprecise) "NaN"/"inf" the old `{n:.1}`
+    /// formatting produced. Neither is a real pnpm lockfileVersion, so
+    /// rejection is correct either way; only the message text is at stake.
+    #[test]
+    fn a_non_finite_bare_version_is_not_given_a_fabricated_decimal_point() {
+        assert_eq!(RawVersion::Num(f64::NAN).normalize(), "NaN");
+        assert_eq!(RawVersion::Num(f64::INFINITY).normalize(), "inf");
+        assert_eq!(RawVersion::Num(f64::NEG_INFINITY).normalize(), "-inf");
+    }
+
+    /// The end-to-end counterpart: a lockfile whose `lockfileVersion` is a
+    /// YAML `.nan`/`.inf` special float must be rejected with a message
+    /// naming what pnpm-lock.yaml actually contains, not a string with a
+    /// fabricated ".0" that appears nowhere in the file.
+    #[test]
+    fn a_lockfile_with_a_non_finite_version_is_rejected_without_a_fabricated_version_string() {
+        for (src_version, must_not_contain) in [(".nan", "NaN.0"), (".inf", "inf.0")] {
+            let src = format!("lockfileVersion: {src_version}\nimporters: {{}}\n");
+            let err = parse(&src).expect_err("a non-finite version must be rejected");
+            let msg = format!("{err}");
+            assert!(
+                !msg.contains(must_not_contain),
+                "must not name a version string absent from the file: {msg}"
+            );
+        }
     }
 
     /// The old `format!("{n:.1}")` did not merely truncate when *reporting* a
